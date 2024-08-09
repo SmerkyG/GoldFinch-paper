@@ -38,9 +38,15 @@ class TMix_gptalpha(nn.Module):
             self.time_maa_r = nn.Parameter(1.0 - torch.pow(ddd, 0.5 * ratio_1_to_almost0))
             self.time_maa_k = nn.Parameter(1.0 - torch.pow(ddd, ratio_1_to_almost0))
             self.time_maa_v = nn.Parameter(1.0 - (torch.pow(ddd, ratio_1_to_almost0) + 0.3 * ratio_0_to_1))
-            D_MIX_LORA = 32
-            self.time_maa_w1 = nn.Parameter(torch.zeros(args.n_embd, D_MIX_LORA*3))
-            self.time_maa_w2 = nn.Parameter(torch.zeros(3, D_MIX_LORA, args.n_embd).uniform_(-0.01, 0.01))
+            self.time_maa_w = nn.Parameter(1.0 - torch.pow(ddd, ratio_1_to_almost0))
+
+            D_MIX_LORA = 32 if args.n_embd < 4096 else 64
+            self.time_maa_w1 = nn.Parameter(torch.zeros(args.n_embd, D_MIX_LORA*4))
+            self.time_maa_w2 = nn.Parameter(torch.zeros(4, D_MIX_LORA, args.n_embd).uniform_(-0.01, 0.01))
+
+            D_DECAY_LORA = 64 if args.n_embd < 4096 else 128
+            self.time_decay_w1 = nn.Parameter(torch.zeros(args.n_embd, D_DECAY_LORA))
+            self.time_decay_w2 = nn.Parameter(torch.zeros(D_DECAY_LORA, args.dim_att//2).uniform_(-0.01, 0.01))
 
         self.query = nn.Linear(args.n_embd, args.dim_att, bias=False)
         self.key = nn.Linear(args.n_embd, args.dim_att, bias=False)
