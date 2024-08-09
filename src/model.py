@@ -165,8 +165,7 @@ class Transformer(nn.Module):
 
         self.emb = nn.Embedding(args.vocab_size, args.n_embd)
 
-        blocks = [Block(config.model, i) for i in range(args.n_layer)]
-        self.blocks = nn.ModuleList([block for block in blocks])
+        self.blocks = nn.ModuleList([Block(config.model, i) for i in range(args.n_layer)])
 
         self.ln_out = nn.LayerNorm(args.n_embd)
         self.head = nn.Linear(args.n_embd, args.vocab_size, bias=False)
