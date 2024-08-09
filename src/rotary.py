@@ -10,6 +10,11 @@ def generate_rotary_embedding(max_seqlen:int, dim:int, theta:float = 10000.0, sc
     angles = torch.outer(torch.arange(max_seqlen), angular_velocity)
     return torch.polar(torch.ones_like(angles), angles)
 
+def generate_dynamic_rotary_embedding(positions:Tensor, dim:int, theta:float = 10000.0, scale:float = 1):
+    angular_velocity = theta ** -(torch.arange(0, dim, 2, dtype=torch.float, device=positions.device) / dim) / scale # frequencies from 1.0 ... 1/theta
+    angles = positions * angular_velocity
+    return torch.polar(torch.ones_like(angles), angles)
+
 def generate_binary_rotary_embedding(max_seqlen:int, dim:int, scale:float=1):
     arange = torch.arange(dim // 2)
     angular_velocity = math.pi * (2.0 ** -arange) / scale # fastest velocity will rotate fully in two steps
@@ -17,6 +22,21 @@ def generate_binary_rotary_embedding(max_seqlen:int, dim:int, scale:float=1):
     #angular_velocity[20:] = 0.0 # don't supply velocities slower than the one that will get a single full rotation across 1024k ctxlen
     angles = torch.outer(torch.arange(max_seqlen), angular_velocity)
     return torch.polar(torch.ones_like(angles), angles)
+
+def apply_single_rotary_embedding(q, angles, seq_dim:int = -2) -> Tensor:
+    if angles.size(0) == 0:
+        return q
+    
+    q_dtype = q.dtype
+    L = q.size(seq_dim)
+    #q_angles = angles[-L:].view(1, 1, L, angles.size(1))
+    q_angles = angles
+    if q.ndim == 3:
+        q = torch.view_as_complex(q.float().reshape(q.size(0), q.size(1), -1, 2)) * q_angles
+    else:
+        q = torch.view_as_complex(q.float().reshape(q.size(0), q.size(1), q.size(2), -1, 2)) * q_angles
+
+    return torch.view_as_real(q).flatten(-2).to(q_dtype)
 
 def apply_rotary_embedding(q, k, angles, seq_dim:int = -2) -> Tuple[Tensor, Tensor]:
     if angles.size(0) == 0:

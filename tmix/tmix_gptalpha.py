@@ -4,7 +4,7 @@ import torch.nn.functional as F
 
 from src.state import ModelState, TimeMixState, Shared
 
-from src.rotary import generate_rotary_embedding, generate_binary_rotary_embedding, apply_rotary_embedding
+from src.rotary import generate_rotary_embedding, generate_binary_rotary_embedding, apply_rotary_embedding, generate_dynamic_rotary_embedding, apply_single_rotary_embedding
 
 from configs import Transformer_Config
 def get_default_state(x:Tensor, config:Transformer_Config, requires_grad:bool):
@@ -72,10 +72,11 @@ class TMix_gptalpha(nn.Module):
         xxx = torch.tanh(xxx @ self.time_maa_w1).view(B*T, self.time_maa_w2.size(0), -1).transpose(0, 1)
         xxx = torch.bmm(xxx, self.time_maa_w2).view(self.time_maa_w2.size(0), B, T, C)
 
-        mr, mk, mv = xxx.unbind(dim=0)
+        mr, mk, mv, mw = xxx.unbind(dim=0)
         xq = x + dxprev * (self.time_maa_r + mr)
         xk = x + dxprev * (self.time_maa_k + mk)
         xv = x + dxprev * (self.time_maa_v + mv)
+        xw = x + dxprev * (self.time_maa_w + mw)
         
         q = self.query(xq)
         k = self.key(xk)
@@ -99,7 +100,24 @@ class TMix_gptalpha(nn.Module):
         k = k.view(B,-1,H,K).transpose(1,2)
         v = v.view(B,-1,H,V).transpose(1,2)
 
-        q, k = apply_rotary_embedding(q, k, shared.angles)
+        q = apply_single_rotary_embedding(q, shared.angles)
+
+        # positions = torch.arange(T, dtype=torch.float, device=x.device).view(1, T, 1).expand(H, T, K//2)
+        # kangles = generate_dynamic_rotary_embedding(positions, K, theta=10000.0)
+        # #kangles = kangles.view(T,H,K//2).transpose(0,1).view(H,T,K//2)
+
+        delta_positions = torch.tanh(xw @ self.time_decay_w1) @ self.time_decay_w2
+        delta_positions = torch.tanh(delta_positions) # optional, to bound delta_positions between 0.0-2.0
+        delta_positions = 1 + delta_positions.float()
+        delta_positions = delta_positions.view(B,T,H,K//2)
+        # delta_positions = torch.ones_like(delta_positions) # FIXME - baseline, remove 
+        delta_positions = delta_positions.transpose(1,2).view(B,H,T,K//2)
+        positions = delta_positions.cumsum(-2) - 1
+        kangles = generate_dynamic_rotary_embedding(positions, K, theta=10000.0)
+        # kangles = kangles.view(B,T,H,K//2).transpose(1,2).view(B,H,T,K//2)
+        # print('kangles.shape', kangles.shape) # kangles.shape [64, 12, 512, 32] B, H, T, K//2
+        
+        k = apply_single_rotary_embedding(k, kangles)
 
         x = nn.functional.scaled_dot_product_attention(q, k, v, is_causal=is_causal)
         x = x.transpose(1,2).reshape(B,T,C)
