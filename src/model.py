@@ -100,7 +100,7 @@ class Block(nn.Module):
             self.drop1 = nn.Identity()
 
     @TCompile
-    def forward(self, x, x_original_cache, k_cache, last_model_state:ModelState, shared:Shared):
+    def forward(self, x, x_original_cache, k_cache, last_model_state:ModelState, shared:Shared, shared_key, shared_value, shared_receptance):
         last_block_state:BlockState = last_model_state.block_states[self.layer_id]
 
         if not self.parallel:
@@ -111,18 +111,18 @@ class Block(nn.Module):
                 time_mix_state = last_block_state.time_mix_state
             ln2x = self.ln2(x)
             if self.ffn is not None:
-                dffn_x, channel_mix_state = self.ffn(ln2x, last_model_state)
+                dffn_x, channel_mix_state = self.ffn(ln2x, last_model_state, shared_key, shared_value, shared_receptance)
                 x = x + dffn_x
             else:
                 channel_mix_state = ChannelMixState()
         else:
             # parallel
             if self.att is not None:
-                dx_att, time_mix_state = self.att(self.ln1(x), x_original_cache, kv_cache, last_model_state, shared)
+                dx_att, time_mix_state = self.att(self.ln1(x), x_original_cache, k_cache, last_model_state, shared)
             else:
                 dx_att, time_mix_state = torch.zeros_like(x), last_block_state.time_mix_state
             if self.ffn is not None:
-                dx_ffn, channel_mix_state = self.ffn(self.ln2(x), last_model_state)
+                dx_ffn, channel_mix_state = self.ffn(self.ln2(x), last_model_state, shared_key, shared_value, shared_receptance)
             else:
                 dx_ffn, channel_mix_state = torch.zeros_like(x), last_block_state.channel_mix_state
 
@@ -170,6 +170,10 @@ class Transformer(nn.Module):
         self.ln_out = nn.LayerNorm(args.n_embd)
         self.head = nn.Linear(args.n_embd, args.vocab_size, bias=False)
 
+        if 'adapt' in args.cmix or 'adapt' in args.cmix2:
+            self.shared_key = nn.Linear(args.n_embd, args.dim_ffn, bias=False)
+            self.shared_receptance = nn.Linear(args.n_embd, args.n_embd, bias=False)
+            self.shared_value = nn.Linear(args.dim_ffn, args.n_embd, bias=False)
 
         if args.dropout > 0:
             self.drop0 = nn.Dropout(p = args.dropout)
@@ -243,10 +247,20 @@ class Transformer(nn.Module):
             ], dim=-2)
         else:
             x_original_from_input_cache = torch.zeros([B, 0, config.dim_att], dtype=x.dtype, device=x.device)
+
+
+        shared_key = torch.tensor([])
+        shared_value = torch.tensor([])
+        shared_receptance = torch.tensor([])
+        if 'adapt' in self.config.model.cmix or 'adapt' in self.config.model.cmix2:
+            shared_key = self.shared_key.weight
+            shared_value = self.shared_value.weight
+            shared_receptance = self.shared_receptance.weight
+
         for layer_id in range(total_n_layer):
             block = self.blocks[layer_id]
 
-            x, next_block_state = self.ckpt(block, x, x_original_from_input_cache, k_cache, last_model_state, shared)
+            x, next_block_state = self.ckpt(block, x, x_original_from_input_cache, k_cache, last_model_state, shared, shared_key, shared_value, shared_receptance)
             if self.is_cache_once and layer_id == get_second_submodel_layer_id(config) - 1:
                 compressed_k_cache_chunk = self.w_kv_cache_a(x)
                 k_tokencat_chunk = torch.cat([x_original_chunk, compressed_k_cache_chunk],dim=-1)
@@ -430,7 +444,7 @@ class Transformer(nn.Module):
             else:
                 assert n.endswith('.weight') # should always be true
 
-                zero = [".att.output.", ".gold.output", ".ffn.value.", ".ffn.receptance."]
+                zero = [".att.output.", ".gold.output", ".ffn.value.", ".ffn.receptance.", ".shared_value.", ".shared_receptance."]
 
                 for kk in zero:
                     if kk in n:
