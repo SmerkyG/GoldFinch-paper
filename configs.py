@@ -241,7 +241,7 @@ def type_name(t):
         rv += ']'
         return rv
 
-def typecheck(path : str, obj : typing.Any, required_type : type = typing.Any):
+def typecheck(path : str, obj : typing.Any, required_type : type = typing.Any, parent : typing.Any = None, key:str = ''):
     errors = ''
     try:
         if isinstance(required_type, str):
@@ -274,7 +274,7 @@ def typecheck(path : str, obj : typing.Any, required_type : type = typing.Any):
                         rt = param.annotation
                         if rt == inspect.Parameter.empty:
                             rt = typing.Any
-                        errors += typecheck(k if path == '' else path + '.' + k, obj[k], rt)
+                        errors += typecheck(k if path == '' else path + '.' + k, obj[k], rt, obj, k)
                     elif param.default == inspect.Parameter.empty:               
                         return f'Required parameter `{path}.{k}` missing in {required_type}\n'
                     else:
@@ -282,9 +282,9 @@ def typecheck(path : str, obj : typing.Any, required_type : type = typing.Any):
                         obj[k] = param.default
 
         elif required_type != typing.Any and not isinstance(obj, required_type) and not (required_type == float and isinstance(obj, int)):
-            if required_type == str and isinstance(obj, int):
+            if required_type == str and not isinstance(obj, str):
                 # allow conversion to string, if we wanted a string
-                obj = str(obj)
+                parent[key] = str(obj)
             else:
                 errors += f"Config Type Mismatch: expected {type_name(required_type)} but got {type_name(type(obj))}\n in config setting `{path}` : {type_name(required_type)} = {obj}\n"
                 return errors
