@@ -58,6 +58,7 @@ class TMix_x052(nn.Module):
 
     def forward(self, x, xo, kv_cache, last_model_state:ModelState, shared:Shared):
         last_state = last_model_state.block_states[self.layer_id].time_mix_state
+        B, T, C = x.size()
         shift_state = x[:, -1].clone()
     
         # Mix x with the previous timestep to produce xk, xv, xr
