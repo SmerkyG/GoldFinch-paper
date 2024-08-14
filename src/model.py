@@ -333,7 +333,7 @@ class Transformer(nn.Module):
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
 
-                for kk in [".att.output", ".gold.output", ".ffn.value", ".ffn.receptance"]:
+                for kk in [".att.output", ".gold.output", ".ffn.value", ".ffn.receptance", ".ffn_value", ".ffn_receptance"]:
                     if name.endswith(kk):
                         scale = 0
 

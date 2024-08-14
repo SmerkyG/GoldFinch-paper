@@ -1,0 +1,48 @@
+model:
+    __type__: configs.FinchC2_Config
+    ctx_len: 4096
+    n_layer: 32
+    n_embd: 4096
+    dim_ffn: 16384 # NOTE - 4x wide FFN!
+    vocab_size: 65536
+    tmix: x060c2
+    cmix: x060
+    tmix2: gold
+    cmix2: x060
+    inv_other_layer_ratio: 3
+    rope:
+        __type__: configs.RoPE_Config
+        base: 500000
+
+train:
+    wandb: "goldfinch" 
+    proj_dir: 'out'
+ 
+    train_stage: 3 
+
+    save_every_n_epochs: 1
+
+    data_type: "binidx" 
+    data_file: "data/minipile" 
+    validation_data_file: "data/minipile_validation" 
+    val_check_interval: 100 
+    my_exit_tokens: 1498226207
+    magic_prime: 365759
+
+    lr_wait: 0.8
+    lr_decay_type: oneminussqrt
+    lr_init: 1.5e-4
+    lr_final: 1e-5
+    warmup_steps: 10 
+    beta1: 0.9 
+    beta2: 0.99 
+    adam_eps: 1e-8 
+    weight_decay: 0.1 
+
+    devices: 8
+    num_nodes: 1
+    micro_bsz: 1
+    accumulate_grad_batches: 1
+    strategy: deepspeed_stage_2
+    grad_cp: 0
+    ds_bucket_mb: 2 # set to 2 for consumer GPUs, set to 200 for A100 / H100 (affects speed & vram usage)

@@ -67,14 +67,14 @@ class InferenceConfig:
 class Train_Config:
     seed_everything:int = 1337
 
-    load_model:str = ''
+    #load_model:str = ''
     wandb:str = ''
     proj_dir:str = 'out'
     proj_name:str = ''
     proj_suffix:str = '0'
 
-    epoch_begin:int = 0
-    epoch_save:int = 5
+    #epoch_begin:int = 0
+    #epoch_save:int = 5
     micro_bsz:int = 12
 
     lr_decay_type:str = 'cos'
@@ -88,6 +88,11 @@ class Train_Config:
     grad_cp:int = 0
     gradient_clip_val:float = 1.0
 
+    ckpt_path:str = None
+    save_every_n_epochs:int = 0
+    save_every_n_steps:int = 0
+    save_top_k:int = 1
+
     weight_decay:float = 0.0
     weight_decay_final:float = -1.0
 
@@ -100,7 +105,7 @@ class Train_Config:
     load_partial:int = 0
 
     check_val_every_n_epoch:int = 1
-    val_check_interval:int|None = None
+    val_check_interval:float|int|None = None
     log_every_n_steps:int = 50
 
     accelerator:str = 'gpu'
@@ -112,6 +117,7 @@ class Train_Config:
 
     data_file:str = ''
     validation_data_file:str = ''
+    validation_tokens:int = 0
     data_type:str = 'utf-8'
 
 @dataclass(kw_only=True)

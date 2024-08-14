@@ -8,11 +8,11 @@ from configs import TrainerCLI_Config
 
 from src.logger import print0 as print
 
-def my_save(config:TrainerCLI_Config, trainer:pl.Trainer, state_dict, path):
-    if 'deepspeed_stage_3' in config.train.strategy:
-        trainer.save_checkpoint(path, weights_only=True)
-    else:
-        torch.save(state_dict, path)
+# def my_save(config:TrainerCLI_Config, trainer:pl.Trainer, state_dict, path):
+#     if 'deepspeed_stage_3' in config.train.strategy:
+#         trainer.save_checkpoint(path, weights_only=True)
+#     else:
+#         torch.save(state_dict, path)
 
 class train_callback(pl.Callback):
     def __init__(self, config:TrainerCLI_Config):
@@ -20,9 +20,32 @@ class train_callback(pl.Callback):
         self.config = config
 
     def on_train_start(self, trainer, pl_module) -> None:
-        # set current epoch properly so we don't need annoying calculations later on to adjust it
-        trainer.fit_loop.epoch_progress.current.ready = self.config.train.epoch_begin
-        trainer.fit_loop.epoch_progress.current.completed = self.config.train.epoch_begin
+        config = self.config
+        if trainer.is_global_zero:  # logging
+            trainer.my_loss_sum = 0
+            trainer.my_loss_count = 0
+            trainer.my_log = open(config.runtime.proj_path + "/train_log.txt", "a")
+            trainer.my_log.write(f"NEW RUN {config.runtime.my_timestamp}\n{vars(self.config)}\n")
+            try:
+                print(f"\n{trainer.strategy.config}\n")
+                trainer.my_log.write(f"{trainer.strategy.config}\n")
+            except:
+                pass
+            trainer.my_log.flush()
+            if len(config.train.wandb) > 0:
+                print("Login to wandb...")
+                import wandb
+                wandb.init(
+                    project=config.train.wandb,
+                    name=config.runtime.run_name + " " + config.runtime.my_timestamp,
+                    config=config,
+                    save_code=False,
+                )
+                trainer.my_wandb = wandb
+
+    #     # set current epoch properly so we don't need annoying calculations later on to adjust it
+    #     trainer.fit_loop.epoch_progress.current.ready = self.config.train.epoch_begin
+    #     trainer.fit_loop.epoch_progress.current.completed = self.config.train.epoch_begin
 
     def on_train_batch_start(self, trainer, pl_module, batch, batch_idx):
         config = self.config
@@ -51,15 +74,15 @@ class train_callback(pl.Callback):
                     print("bad lr_decay_type specified")
                     exit()
 
-            if lr_progress >= 1:
-                if (trainer.is_global_zero) or ('deepspeed_stage_3' in config.train.strategy):
-                    my_save(
-                        config, trainer,
-                        pl_module.model.state_dict(),
-                        f"{config.runtime.proj_path}/rwkv-final.pth",
-                    )
-                    print("!!!TRAINING COMPLETE!!!")
-                    exit(0)
+            # if lr_progress >= 1:
+            #     if (trainer.is_global_zero) or ('deepspeed_stage_3' in config.train.strategy):
+            #         my_save(
+            #             config, trainer,
+            #             pl_module.model.state_dict(),
+            #             f"{config.runtime.proj_path}/rwkv-final.pth",
+            #         )
+            #         print("!!!TRAINING COMPLETE!!!")
+            #         exit(0)
 
         if trainer.global_step < config.train.warmup_steps:
             lr = lr * (0.2 + 0.8 * trainer.global_step / config.train.warmup_steps)
@@ -81,29 +104,6 @@ class train_callback(pl.Callback):
         trainer.my_lr = lr
         trainer.my_wd = wd_now
         # rank_zero_info(f"{real_global_step} {lr}")
-
-        if trainer.global_step == 0 and batch_idx == 0:
-            if trainer.is_global_zero:  # logging
-                trainer.my_loss_sum = 0
-                trainer.my_loss_count = 0
-                trainer.my_log = open(config.runtime.proj_path + "/train_log.txt", "a")
-                trainer.my_log.write(f"NEW RUN {config.runtime.my_timestamp}\n{vars(self.config)}\n")
-                try:
-                    print(f"\n{trainer.strategy.config}\n")
-                    trainer.my_log.write(f"{trainer.strategy.config}\n")
-                except:
-                    pass
-                trainer.my_log.flush()
-                if len(config.train.wandb) > 0:
-                    print("Login to wandb...")
-                    import wandb
-                    wandb.init(
-                        project=config.train.wandb,
-                        name=config.runtime.run_name + " " + config.runtime.my_timestamp,
-                        config=config,
-                        save_code=False,
-                    )
-                    trainer.my_wandb = wandb
 
     def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
         config = self.config
@@ -135,15 +135,15 @@ class train_callback(pl.Callback):
             #     if kt_s > 0:
             #         lll["kt/s"] = kt_s
             #     trainer.my_wandb.log(lll, step=int(real_global_step))
-        if (trainer.is_global_zero) or ('deepspeed_stage_3' in config.train.strategy): # save pth
-            if config.train.magic_prime > 0:
-                expand_factor = 1
-                if int(real_global_step) == int(config.train.magic_prime * expand_factor // self.config.runtime.global_step_bsz) - 1:
-                    my_save(
-                        config, trainer,
-                        pl_module.model.state_dict(),
-                        f"{config.runtime.proj_path}/rwkv-final.pth",
-                    )
+        # if (trainer.is_global_zero) or ('deepspeed_stage_3' in config.train.strategy): # save pth
+        #     if config.train.magic_prime > 0:
+        #         expand_factor = 1
+        #         if int(real_global_step) == int(config.train.magic_prime * expand_factor // self.config.runtime.global_step_bsz) - 1:
+        #             my_save(
+        #                 config, trainer,
+        #                 pl_module.model.state_dict(),
+        #                 f"{config.runtime.proj_path}/rwkv-final.pth",
+        #             )
                 
 
     def on_train_epoch_start(self, trainer, pl_module):
@@ -159,19 +159,19 @@ class train_callback(pl.Callback):
         config = self.config
         to_save_dict = {}
         real_current_epoch = trainer.current_epoch
-        if (trainer.is_global_zero) or ('deepspeed_stage_3' in config.train.strategy):  # save pth
-            if (config.train.epoch_save > 0 and (real_current_epoch+1) % config.train.epoch_save == 0) or (real_current_epoch == config.runtime.epoch_count - 1):
-                try:
-                    my_save(
-                        config, trainer,
-                        pl_module.model.state_dict(),
-                        f"{config.runtime.proj_path}/rwkv-{trainer.current_epoch}.pth",
-                    )
-                except Exception as e:
-                    print('Error\n\n', e, '\n\n')
+        # if (trainer.is_global_zero) or ('deepspeed_stage_3' in config.train.strategy):  # save pth
+        #     if (config.train.epoch_save > 0 and (real_current_epoch+1) % config.train.epoch_save == 0) or (real_current_epoch == config.runtime.epoch_count - 1):
+        #         try:
+        #             my_save(
+        #                 config, trainer,
+        #                 pl_module.model.state_dict(),
+        #                 f"{config.runtime.proj_path}/rwkv-{trainer.current_epoch}.pth",
+        #             )
+        #         except Exception as e:
+        #             print('Error\n\n', e, '\n\n')
 
         if trainer.is_global_zero:  # logging
-            trainer.my_log.write(f"{real_current_epoch} {trainer.my_epoch_loss:.6f} {math.exp(trainer.my_epoch_loss):.4f} {trainer.my_lr:.8f} {datetime.datetime.now()} {real_current_epoch - config.train.epoch_begin}\n")
+            trainer.my_log.write(f"{real_current_epoch} {trainer.my_epoch_loss:.6f} {math.exp(trainer.my_epoch_loss):.4f} {trainer.my_lr:.8f} {datetime.datetime.now()} \n") # {real_current_epoch - config.train.epoch_begin}\n")
             trainer.my_log.flush()
 
             trainer.my_loss_sum = 0
