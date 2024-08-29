@@ -1058,7 +1058,7 @@ class Qwen2RWKV6cSimple(Qwen2Attention):
         H = self.num_heads
 
         x = hidden_states
-        dxprev = torch.nn.functional.pad(x, (0, 0, -1, 1)) - x
+        dxprev = torch.nn.functional.pad(x, (0, 0, 1, -1)) - x
 
         xxx = x + dxprev * self.time_maa_x
         xxx = torch.tanh(xxx @ self.time_maa_w1).view(bsz*q_len, self.time_maa_w2.size(0), -1).transpose(0, 1)
