@@ -64,8 +64,16 @@ class InferenceConfig:
     path:str = ''
 
 @dataclass(kw_only=True)
+class TeacherConfig(InferenceConfig):
+    attention_distillation_stage:int = 0
+    kl_weight:float = 0.5
+    ce_weight:float = 0.5
+
+@dataclass(kw_only=True)
 class Train_Config:
     seed_everything:int = 1337
+
+    teacher:TeacherConfig = None
 
     load_model:str = ''
     wandb:str = ''

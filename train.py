@@ -63,7 +63,7 @@ if __name__ == "__main__":
 
     runtime_config.epoch_global_steps = EPOCH_SAMPLE_SIZE // runtime_config.global_step_bsz
     assert runtime_config.epoch_global_steps * runtime_config.global_step_bsz == EPOCH_SAMPLE_SIZE
-    if config.train.train_stage >= 2:  # find latest saved model
+    if config.train.load_model == '' and config.train.train_stage >= 2:  # find latest saved model
         list_p = []
         for p in os.listdir(config.runtime.proj_path):
             if p.startswith("rwkv") and p.endswith(".pth"):
@@ -152,6 +152,10 @@ if __name__ == "__main__":
 
     from src.lit import LightningModelWrapper
     from src.model import Transformer
+    from qwen2.modeling_qwen2rwkv6csimple import Qwen2ForCausalLM
+    from qwen2.configuration_qwen2 import Qwen2Config
+
+    from safetensors.torch import load_file
 
     # FIXME - why use_distributed_sampler=False? was this an oversight in the original repo? is this related to replace_sampler_ddp from Bo's code?
     trainer = Trainer(
@@ -173,10 +177,56 @@ if __name__ == "__main__":
                         gradient_clip_val=config.train.gradient_clip_val, 
                         val_check_interval=config.train.val_check_interval)
 
-    with trainer.init_module(empty_init=not config.train.load_partial):
-        model = Transformer(config)
-        wrapper = LightningModelWrapper(model, config)
+    teacher = None
+    if config.train.train_stage > 1:
+        teacher_config = config.train.teacher
+        if teacher_config is not None and teacher_config.path != '':
+            if teacher_config.path.lower().endswith('.safetensors'):
+                load_dict = load_file(teacher_config.path)
+            else:
+                load_dict = torch.load(teacher_config.path, map_location="cpu")
+            with trainer.init_module(empty_init=True):
+                if teacher_config.model.tmix == 'qwen2':
+                    cfg = {
+                        "attention_dropout": 0.0,
+                        "bos_token_id": 151643,
+                        "eos_token_id": 151643,
+                        "hidden_act": "silu",
+                        "hidden_size": 896,
+                        "initializer_range": 0.02,
+                        "intermediate_size": 4864,
+                        "max_position_embeddings": 131072,
+                        "max_window_layers": 24,
+                        "model_type": "qwen2",
+                        "num_attention_heads": 14,
+                        "num_hidden_layers": 24,
+                        "num_key_value_heads": 2,
+                        "rms_norm_eps": 1e-06,
+                        "rope_theta": 1000000.0,
+                        "sliding_window": 131072,
+                        "tie_word_embeddings": True,
+                        "torch_dtype": "bfloat16",
+                        "transformers_version": "4.40.1",
+                        "use_cache": True,
+                        "use_sliding_window": False,
+                        "vocab_size": 151936,
+                    }
+                    teacher = Qwen2ForCausalLM(Qwen2Config(**cfg), teacher_config)
+                    load_dict['lm_head.weight'] = load_dict['model.embed_tokens.weight']
+                else:
+                    teacher = Transformer(teacher_config)
+            teacher.load_state_dict(load_dict)
+            teacher.eval()
+            teacher.requires_grad_(False)
 
+    with trainer.init_module(empty_init=not config.train.load_partial):
+        if config.model.tmix == 'qwen2':
+            model = Qwen2ForCausalLM(Qwen2Config(rwkv=True, **cfg), config)
+        else:
+            model = Transformer(config)
+                
+        wrapper = LightningModelWrapper(model, config, teacher)
+        
     if config.train.train_stage == 1:  # should we build the initial weights?
         init_weight_name = f"{config.runtime.proj_path}/rwkv-init.pth"
         mm = model.generate_init_weight()
@@ -186,7 +236,11 @@ if __name__ == "__main__":
         exit(0)
 
     rank_zero_info(f"########## Loading {config.train.load_model}... ##########")
-    load_dict = torch.load(config.train.load_model, map_location="cpu")
+    if config.train.load_model.lower().endswith('.safetensors'):
+        load_dict = load_file(config.train.load_model)
+        load_dict['lm_head.weight'] = load_dict['model.embed_tokens.weight']
+    else:
+        load_dict = torch.load(config.train.load_model, map_location="cpu")
 
     if config.train.load_partial == 1:
         load_keys = load_dict.keys()

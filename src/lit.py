@@ -1,5 +1,6 @@
 import os, math, gc, importlib
 import torch
+import torch.linalg
 import torch.utils.checkpoint
 # torch._C._jit_set_profiling_executor(True)
 # torch._C._jit_set_profiling_mode(True)
@@ -41,10 +42,11 @@ class L2Wrap(torch.autograd.Function):
         return (grad_output, gy)
 
 class LightningModelWrapper(pl.LightningModule):
-    def __init__(self, model:nn.Module, config:TrainerCLI_Config):
+    def __init__(self, model:nn.Module, config:TrainerCLI_Config, teacher:nn.Module|None):
         super().__init__()
         self.model = model
         self.config = config
+        self.teacher = teacher
         self.metrics = dict(loss=metrics.Loss(), acc=metrics.Accuracy())
 
     def forward(self, idx, last_model_state:ModelState|None = None):
@@ -71,19 +73,47 @@ class LightningModelWrapper(pl.LightningModule):
 
     def _get_loss_logits_preds(self, batch, batch_idx, last_model_state):
         x, y = batch
+
+        if self.training and self.teacher is not None and self.config.train.teacher.attention_distillation_stage in (1, 2):
+            stage = self.config.train.teacher.attention_distillation_stage
+            output_attentions = stage == 1
+            output_attention_hidden_states = stage == 2
+            # FIXME - special code for attention matrix loss
+            with torch.no_grad():
+                teacher_results = self.teacher.forward(x, return_dict=True, output_hidden_states=True, output_attentions=output_attentions, output_attention_hidden_states=output_attention_hidden_states)
+            student_results = self.model.forward_attentions(teacher_results.hidden_states, output_attentions=output_attentions, output_attention_hidden_states=output_attention_hidden_states)
+            if stage == 1:
+                reported_loss = training_loss = torch.linalg.matrix_norm(torch.cat(teacher_results.attentions, dim=0) - torch.cat(student_results.attentions, dim=0)).mean() / teacher_results.attentions[0].size(-1)
+            else: # stage == 2:
+                reported_loss = training_loss = torch.linalg.vector_norm(torch.cat(teacher_results.attention_hidden_states, dim=0) - torch.cat(student_results.attention_hidden_states, dim=0), dim=-1).mean() * (student_results.attention_hidden_states[0].size(-1) ** -0.5)
+            logits = torch.tensor([], device=x.device)
+            preds = torch.zeros_like(y)
+            return reported_loss, training_loss, logits, preds, last_model_state
+
         logits, next_model_state = self(x, last_model_state)
     
-        loss = F.cross_entropy(logits.view(-1, logits.size(-1)), y.flatten())
+        reported_loss = training_loss = F.cross_entropy(logits.view(-1, logits.size(-1)), y.flatten())
         with torch.no_grad():
             preds = logits.argmax(dim=-1)
 
-        if loss.isinf().any():
+        if self.training and self.teacher is not None and self.config.train.teacher.attention_distillation_stage in (0, 3):
+            with torch.no_grad():
+                teacher_logits, _ = self.teacher.forward(x)
+            distillation_loss = F.kl_div(
+                F.log_softmax(logits.view(-1, logits.size(-1)), dim=-1),
+                F.log_softmax(teacher_logits.view(-1, logits.size(-1)), dim=-1),
+                log_target=True,
+                reduction='batchmean'
+            )
+            training_loss = distillation_loss * self.config.train.teacher.kl_weight + training_loss * self.config.train.teacher.ce_weight
+
+        if training_loss.isinf().any():
             raise Exception("loss was infinite")
 
-        if loss.isnan().any():
+        if training_loss.isnan().any():
             raise Exception("loss was NaN")
 
-        return loss, logits, preds, next_model_state
+        return reported_loss, training_loss, logits, preds, next_model_state
     
     def get_real_global_step(self): return int(self.trainer.global_step + self.config.train.epoch_begin * self.config.runtime.epoch_global_steps)
     def get_real_tokens(self): return self.get_real_global_step() * self.config.model.ctx_len * self.config.runtime.global_step_bsz
@@ -107,7 +137,7 @@ class LightningModelWrapper(pl.LightningModule):
 
         model_state = None
 
-        loss, logits, preds, model_state = self._get_loss_logits_preds((inputs, labels), batch_idx, model_state)
+        loss, training_loss, logits, preds, model_state = self._get_loss_logits_preds((inputs, labels), batch_idx, model_state)
         margs = metrics.MetricArgs(inputs, logits, preds, labels, loss)
         # FIXME - sync from other devices/nodes here
         for metric in self.metrics.values():
@@ -128,7 +158,10 @@ class LightningModelWrapper(pl.LightningModule):
                     if len(self.config.train.wandb) > 0:
                         self.trainer.my_wandb.log(logdict, step=self.get_real_global_step(), commit=True)
 
-        return L2Wrap.apply(loss, logits)
+        if logits.size(0) > 0:
+            return L2Wrap.apply(training_loss, logits)
+        else:
+            return training_loss
 
     def on_validation_epoch_start(self):
         if self.trainer.is_global_zero:
@@ -157,7 +190,7 @@ class LightningModelWrapper(pl.LightningModule):
 
     def validation_step(self, batch, batch_idx):
         inputs, labels = batch
-        loss, logits, preds, next_block_states = self._get_loss_logits_preds(batch, batch_idx, None)
+        loss, training_loss, logits, preds, next_block_states = self._get_loss_logits_preds(batch, batch_idx, None)
         margs = metrics.MetricArgs(inputs, logits, preds, labels, loss)
         for name, metric in self.metrics.items():
             metric.update(margs)

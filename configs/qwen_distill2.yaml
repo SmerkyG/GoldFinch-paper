@@ -1,0 +1,37 @@
+model:
+    __type__: configs.Transformer_Config
+    tmix: qwen2
+    ctx_len: 512 # 4096
+    vocab_size: 151936
+
+train:
+  proj_name: qwen2-0B5
+  proj_suffix: 2
+  train_stage: 3
+  load_model: /home/recursal/LinearAttentionArena/out/qwen2-0B5-1/rwkv-final.pth
+  load_partial: 0
+
+  data_type: "binidx" 
+  data_file: "data/minipile_qwen2" 
+  my_exit_tokens: 10000000 # 1491785955
+  magic_prime: 2913641 # 364193
+
+  lr_init: 3e-5
+  lr_final: 2e-5
+  warmup_steps: 10 
+  beta1: 0.9 
+  beta2: 0.99 
+  adam_eps: 1e-8 
+  weight_decay: 0.001 
+
+  devices: 1
+  num_nodes: 1
+  micro_bsz: 1
+  accumulate_grad_batches: 1
+  
+  teacher:
+    path: /home/recursal/LinearAttentionArena/out/qwen2-0B5.safetensors
+    attention_distillation_stage: 2
+    model:
+        __type__: configs.Transformer_Config
+        tmix: qwen2
