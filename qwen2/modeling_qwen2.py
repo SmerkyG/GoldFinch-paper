@@ -421,7 +421,7 @@ def fla_chunk_simple_gla(
     g: torch.Tensor,  # log decay
 ) -> torch.Tensor:
     scale = 1.0
-    o = SimpleGLAFunction.apply(q, k, v, g, scale)
+    o = SimpleGLAFunction.apply(q.contiguous(), k.contiguous(), v.contiguous(), g.contiguous(), scale)
     return o
 
 if is_flash_attn_2_available():
