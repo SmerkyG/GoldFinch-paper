@@ -6,7 +6,7 @@ model:
 
 train:
   proj_name: qwen2-0B5
-  proj_suffix: 2
+  proj_suffix: 1
   train_stage: 3
   load_model: /home/recursal/LinearAttentionArena/out/qwen2-0B5.safetensors
   load_partial: 1
@@ -17,7 +17,7 @@ train:
   magic_prime: 2913641 # 364193
 
   lr_init: 1e-3
-  lr_final: 2e-3
+  lr_final: 1e-4
   warmup_steps: 10 
   beta1: 0.9 
   beta2: 0.99 
