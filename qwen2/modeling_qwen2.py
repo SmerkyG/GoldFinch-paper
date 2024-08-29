@@ -48,6 +48,381 @@ from transformers.utils import (
 )
 from .configuration_qwen2 import Qwen2Config
 
+# -*- coding: utf-8 -*-
+# Copyright (c) 2023, Yu Zhang, Songlin Yang
+
+from typing import Optional, Tuple
+
+import torch
+import triton
+import triton.language as tl
+#from torch.cuda.amp import custom_bwd, custom_fwd
+
+#from fla.utils import contiguous
+
+
+@triton.jit
+def chunk_simple_gla_fwd_kernel_h(
+    k,
+    v,
+    h,
+    g,
+    #h0,
+    #ht,
+    s_qk_h,
+    s_qk_t,
+    s_qk_d,
+    s_vo_h,
+    s_vo_t,
+    s_vo_d,
+    s_h_h,
+    s_h_t,
+    T: tl.constexpr,
+    K: tl.constexpr,
+    V: tl.constexpr,
+    BT: tl.constexpr,
+    BK: tl.constexpr,
+    BV: tl.constexpr,
+    NT: tl.constexpr,
+    USE_INITIAL_STATE: tl.constexpr,
+    STORE_FINAL_STATE: tl.constexpr
+):
+    i_k, i_v, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+
+    # [BK, BV]
+    b_h = tl.zeros([BK, BV], dtype=tl.float32)
+
+    # if USE_INITIAL_STATE:
+    #     p_h0 = tl.make_block_ptr(h0 + i_bh * K * V, (K, V), (V, 1), (i_k * BK, i_v * BV), (BK, BV), (1, 0))
+    #     b_h = tl.load(p_h0, boundary_check=(0, 1)).to(tl.float32)
+
+    for i_t in range(NT):
+        p_k = tl.make_block_ptr(k + i_bh * s_qk_h, (K, T), (s_qk_d, s_qk_t), (i_k * BK, i_t * BT), (BK, BT), (0, 1))
+        p_v = tl.make_block_ptr(v + i_bh * s_vo_h, (T, V), (s_vo_t, s_vo_d), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
+        p_h = tl.make_block_ptr(h + i_bh * s_h_h + i_t * K * V, (K, V), (s_h_t, 1), (i_k * BK, i_v * BV), (BK, BV), (1, 0))
+
+        tl.store(p_h, b_h.to(p_h.dtype.element_ty), boundary_check=(0, 1))
+        # [BK, BT]
+        b_k = tl.load(p_k, boundary_check=(0, 1))
+        # [BT, BV]
+        b_v = tl.load(p_v, boundary_check=(0, 1))
+        # [BK, BV]
+        b_g_last = tl.load(g + i_bh * T + i_t * BT + BT - 1)
+        b_h *= tl.exp(b_g_last.to(b_h.dtype))
+        b_g = tl.load(g + i_bh * T + i_t * BT + tl.arange(0, BT))
+        b_h += tl.dot(b_k, (b_v * tl.exp(b_g_last.to(tl.float32) - b_g.to(tl.float32))[:, None]).to(b_k.dtype), allow_tf32=False)
+
+    # if STORE_FINAL_STATE:
+    #     p_ht = tl.make_block_ptr(ht + i_bh * K * V, (K, V), (V, 1), (i_k * BK, i_v * BV), (BK, BV), (1, 0))
+    #     tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), boundary_check=(0, 1))
+
+
+@triton.jit
+def chunk_simple_gla_fwd_kernel_o(
+    q,
+    k,
+    v,
+    h,
+    g,
+    o,
+    s_qk_h,
+    s_qk_t,
+    s_qk_d,
+    s_vo_h,
+    s_vo_t,
+    s_vo_d,
+    s_h_h,
+    s_h_t,
+    scale,
+    T: tl.constexpr,
+    K: tl.constexpr,
+    V: tl.constexpr,
+    BT: tl.constexpr,
+    BK: tl.constexpr,
+    BV: tl.constexpr
+):
+    i_v, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+
+    o_i = tl.arange(0, BT)
+    m_s = o_i[:, None] >= o_i[None, :]
+
+    b_o = tl.zeros([BT, BV], dtype=tl.float32)
+    b_s = tl.zeros([BT, BT], dtype=tl.float32)
+    for i_k in range(tl.cdiv(K, BK)):
+        p_q = tl.make_block_ptr(q + i_bh * s_qk_h, (T, K), (s_qk_t, s_qk_d), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+        p_k = tl.make_block_ptr(k + i_bh * s_qk_h, (K, T), (s_qk_d, s_qk_t), (i_k * BK, i_t * BT), (BK, BT), (0, 1))
+        p_h = tl.make_block_ptr(h + i_bh * s_h_h + i_t * K * V, (K, V), (s_h_t, 1), (i_k * BK, i_v * BV), (BK, BV), (1, 0))
+
+        # [BT, BK]
+        b_q = tl.load(p_q, boundary_check=(0, 1))
+        # [BK, BT]
+        b_k = tl.load(p_k, boundary_check=(0, 1))
+        # [BT]
+
+        # [BK, BV]
+        b_h = tl.load(p_h, boundary_check=(0, 1))
+        b_o += tl.dot(b_q, b_h, allow_tf32=False)
+        b_s += tl.dot(b_q, b_k, allow_tf32=False)
+
+    p_g = g + i_bh * T + i_t * BT + tl.arange(0, BT)
+    b_g = tl.load(p_g).to(tl.float32)
+    b_o = b_o * tl.exp(b_g)[:, None]
+    b_s = b_s * tl.exp(b_g[:, None] - b_g[None, :])
+    b_s = tl.where(m_s, b_s, 0)
+
+    p_v = tl.make_block_ptr(v + i_bh * s_vo_h, (T, V), (s_vo_t, s_vo_d), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
+    b_v = tl.load(p_v, boundary_check=(0, 1))
+    b_o = (b_o + tl.dot(b_s.to(b_v.dtype), b_v, allow_tf32=False)) * scale
+    p_o = tl.make_block_ptr(o + i_bh * s_vo_h, (T, V), (s_vo_t, s_vo_d), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
+    tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0, 1))
+
+
+@triton.jit
+def chunk_simple_gla_bwd_kernel_dh(
+    q,
+    g,
+    do,
+    dh,
+    s_qk_h,
+    s_qk_t,
+    s_qk_d,
+    s_vo_h,
+    s_vo_t,
+    s_vo_d,
+    s_h_h,
+    s_h_t,
+    scale,
+    T: tl.constexpr,
+    K: tl.constexpr,
+    V: tl.constexpr,
+    BT: tl.constexpr,
+    BK: tl.constexpr,
+    BV: tl.constexpr,
+    NT: tl.constexpr
+):
+    i_k, i_v, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+
+    # [BK, BV]
+    b_dh = tl.zeros([BK, BV], dtype=tl.float32)
+    for i_t in range(NT - 1, -1, -1):
+        p_q = tl.make_block_ptr(q + i_bh * s_qk_h, (K, T), (s_qk_d, s_qk_t), (i_k * BK, i_t * BT), (BK, BT), (0, 1))
+        p_do = tl.make_block_ptr(do + i_bh * s_vo_h, (T, V), (s_vo_t, s_vo_d), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
+        p_dh = tl.make_block_ptr(dh + i_bh * s_h_h + i_t * K * V, (K, V), (s_h_t, 1), (i_k * BK, i_v * BV), (BK, BV), (1, 0))
+
+        tl.store(p_dh, b_dh.to(p_dh.dtype.element_ty), boundary_check=(0, 1))
+        # [BK, BT]
+        b_q = tl.load(p_q, boundary_check=(0, 1))
+        b_q = (b_q * scale * tl.exp(tl.load(g + i_bh * T + i_t * BT + tl.arange(0, BT)).to(tl.float32))[None, :]).to(b_q.dtype)
+        # [BT, V]
+        b_do = tl.load(p_do, boundary_check=(0, 1))
+        # [BK, BV]
+        b_dh *= tl.exp(tl.load(g + i_bh * T + i_t * BT + BT - 1).to(tl.float32))
+        b_dh += tl.dot(b_q, b_do.to(b_q.dtype), allow_tf32=False)
+
+
+@triton.jit
+def chunk_simple_gla_bwd_kernel_dqkv(
+    q,
+    k,
+    v,
+    h,
+    g,
+    do,
+    dh,
+    dq,
+    dk,
+    dv,
+    s_qk_h,
+    s_qk_t,
+    s_qk_d,
+    s_vo_h,
+    s_vo_t,
+    s_vo_d,
+    s_h_h,
+    s_h_t,
+    scale,
+    T: tl.constexpr,
+    K: tl.constexpr,
+    V: tl.constexpr,
+    BT: tl.constexpr,
+    BK: tl.constexpr,
+    BV: tl.constexpr,
+    NT: tl.constexpr
+):
+    i_k, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    n_bh = tl.num_programs(2)
+    o_i = tl.arange(0, BT)
+
+    p_q = tl.make_block_ptr(q + i_bh * s_qk_h, (K, T), (s_qk_d, s_qk_t), (i_k * BK, i_t * BT), (BK, BT), (0, 1))
+    p_k = tl.make_block_ptr(k + i_bh * s_qk_h, (T, K), (s_qk_t, s_qk_d), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+
+    b_q = tl.load(p_q, boundary_check=(0, 1))
+    b_k = tl.load(p_k, boundary_check=(0, 1))
+    b_s = tl.dot(b_k, b_q, allow_tf32=False)
+    p_g = g + i_bh * T + i_t * BT + tl.arange(0, BT)
+    b_g = tl.load(p_g).to(tl.float32)
+    b_g_last = tl.load(g + i_bh * T + i_t * BT + BT - 1).to(tl.float32)
+    mask = tl.exp(b_g[None, :] - b_g[:, None])
+    mask = tl.where(o_i[:, None] <= o_i[None, :], mask * scale, 0)
+    b_s = b_s * mask
+
+    b_dq = tl.zeros([BT, BK], dtype=tl.float32)
+    b_dk = tl.zeros([BT, BK], dtype=tl.float32)
+    b_ds = tl.zeros([BT, BT], dtype=tl.float32)
+    for i_v in range(tl.cdiv(V, BV)):
+        p_v = tl.make_block_ptr(v + i_bh * s_vo_h, (T, V), (s_vo_t, s_vo_d), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
+        p_h = tl.make_block_ptr(h + i_bh * s_h_h, (V, NT * K), (1, s_h_t), (i_v * BV, i_t * K + i_k * BK), (BV, BK), (0, 1))
+        p_do = tl.make_block_ptr(do + i_bh * s_vo_h, (T, V), (s_vo_t, s_vo_d), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
+        p_dh = tl.make_block_ptr(dh + i_bh * s_h_h, (NT * K, V), (s_h_t, 1), (i_t * K + i_k * BK, i_v * BV), (BK, BV), (1, 0))
+        p_dv = tl.make_block_ptr(dv + (i_k*n_bh+i_bh)*s_vo_h, (T, V), (s_vo_t, s_vo_d), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
+        # [BT, BV]
+        b_v = tl.load(p_v, boundary_check=(0, 1))
+        b_do = tl.load(p_do, boundary_check=(0, 1))
+        # [BV, BK]
+        b_h = tl.load(p_h, boundary_check=(0, 1))
+        # [BK, BV]
+        b_dh = tl.load(p_dh, boundary_check=(0, 1))
+        # [BT, BT]
+        b_ds += tl.dot(b_do, tl.trans(b_v), allow_tf32=False)
+        # [BT, BK]
+        b_dq += tl.dot(b_do, b_h, allow_tf32=False) * scale
+        b_dk += tl.dot(b_v, tl.trans(b_dh), allow_tf32=False)
+        # [BT, BV]
+        b_dv = tl.dot(b_k, b_dh, allow_tf32=False) * tl.exp(-b_g + b_g_last)[:, None]
+        b_dv += tl.dot(b_s.to(b_q.dtype), b_do, allow_tf32=False)
+        tl.store(p_dv, b_dv.to(p_dv.dtype.element_ty), boundary_check=(0, 1))
+
+    b_dq = b_dq * tl.exp(b_g)[:, None]
+    b_dk = b_dk * tl.exp(-b_g + b_g_last)[:, None]
+    b_ds = b_ds * tl.trans(mask)
+    b_ds = b_ds.to(b_k.dtype)
+    # [BT, BK]
+    b_dq += tl.dot(b_ds, b_k, allow_tf32=False)
+    b_dk += tl.trans(tl.dot(b_q, b_ds, allow_tf32=False))
+    p_dq = tl.make_block_ptr(dq + i_bh * s_qk_h, (T, K), (s_qk_t, s_qk_d), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+    p_dk = tl.make_block_ptr(dk + i_bh * s_qk_h, (T, K), (s_qk_t, s_qk_d), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+    tl.store(p_dq, b_dq.to(p_dq.dtype.element_ty), boundary_check=(0, 1))
+    tl.store(p_dk, b_dk.to(p_dk.dtype.element_ty), boundary_check=(0, 1))
+
+def rev_cumsum(x):
+    cumsum_x = x.cumsum(-1)
+    rev_cumsum_x = cumsum_x[..., -1, None] - cumsum_x
+    return rev_cumsum_x + x
+
+class SimpleGLAFunction(torch.autograd.Function):
+
+    #@contiguous
+    #@custom_fwd
+    @staticmethod
+    def forward(ctx, q, k, v, g, scale):#, initial_state, output_final_state):
+        B, H, T, K, V = q.size(0), q.size(1), q.size(2), q.size(3), v.shape[-1]
+        BT = 64
+        BK, BV = min(64, triton.next_power_of_2(K)), min(64, triton.next_power_of_2(V))
+        NT, NK, NV = triton.cdiv(T, BT), triton.cdiv(K, BK), triton.cdiv(V, BV)
+        num_warps = 4 if BK == 64 else 2
+        num_stages = 1
+
+        assert T % BT == 0, 'sequence length must be divisible by BT'
+        g = g.reshape(B, H, -1, BT)
+        g = g.cumsum(-1)
+        g = g.reshape(B, H, -1)
+
+        # final_state = None
+        # if output_final_state:
+        #     final_state = q.new_empty(B, H, K, V, dtype=torch.float32, requires_grad=False)
+
+        h = q.new_empty(B, H, NT * K, V)
+        grid = (NK, NV, B * H)
+        chunk_simple_gla_fwd_kernel_h[grid](
+            k, v, h, g, #initial_state, final_state,
+            q.stride(1), q.stride(2), q.stride(3),
+            v.stride(1), v.stride(2), v.stride(3),
+            h.stride(1), h.stride(2),
+            T=T, K=K, V=V, BT=BT, BK=BK, BV=BV, NT=NT,
+            USE_INITIAL_STATE=False,#initial_state is not None,
+            STORE_FINAL_STATE=False,#output_final_state,
+            num_warps=num_warps,
+            num_stages=num_stages
+        )
+        grid = (NV, NT, B * H)
+        o = torch.empty_like(v)
+        chunk_simple_gla_fwd_kernel_o[grid](
+            q, k, v, h, g, o,
+            q.stride(1), q.stride(2), q.stride(3),
+            v.stride(1), v.stride(2), v.stride(3),
+            h.stride(1), h.stride(2),
+            scale,
+            T=T, K=K, V=V, BT=BT, BK=BK, BV=BV,
+            num_warps=num_warps,
+            num_stages=num_stages
+        )
+
+        ctx.save_for_backward(q, k, v, h, g)
+        ctx.scale = scale
+        return o.to(q.dtype)#, final_state
+
+    # @staticmethod
+    # def backward(ctx, do):#, dht=None):
+    #     return None, None, None, None, None
+
+    # @contiguous
+    # #@custom_bwd
+    @staticmethod
+    def backward(ctx, do):#, dht=None):
+        q, k, v, h, g = ctx.saved_tensors
+
+        B, H, T, K, V = *q.shape, v.shape[-1]
+        BT = 64
+        BK = min(32 if q.dtype == torch.float32 else 64, triton.next_power_of_2(K))
+        BV = min(32 if q.dtype == torch.float32 else 64, triton.next_power_of_2(V))
+        NT, NK, NV = triton.cdiv(T, BT), triton.cdiv(K, BK), triton.cdiv(V, BV)
+        num_warps = 4 if BK == 64 else 2
+        num_stages = 1
+        scale = ctx.scale
+
+        dh = q.new_empty(B, H, NT * K, V)
+        grid = (NK, NV, B * H)
+        chunk_simple_gla_bwd_kernel_dh[grid](
+            q, g, do, dh,
+            q.stride(1), q.stride(2), q.stride(3),
+            v.stride(1), v.stride(2), v.stride(3),
+            dh.stride(1), dh.stride(2),
+            scale,
+            T=T, K=K, V=V, BT=BT, BK=BK, BV=BV, NT=NT,
+            num_warps=num_warps,
+            num_stages=num_stages
+        )
+        grid = (NK, NT, B * H)
+        dq = torch.empty_like(q)
+        dk = torch.empty_like(k)
+        dv = v.new_empty(NK, *v.shape)
+        num_stages = 1
+        num_warps = 4 if BK == 64 else 2
+        chunk_simple_gla_bwd_kernel_dqkv[grid](
+            q, k, v, h, g, do, dh, dq, dk, dv,
+            q.stride(1), q.stride(2), q.stride(3),
+            v.stride(1), v.stride(2), v.stride(3),
+            dh.stride(1), dh.stride(2),
+            scale,
+            T=T, K=K, V=V, BT=BT, BK=BK, BV=BV, NT=NT,
+            num_warps=num_warps,
+            num_stages=num_stages
+        )
+        dv = dv.sum(0)
+        dg = (dq * q - dk * k).sum(-1)
+
+        dg = rev_cumsum(dg)
+        return dq.to(q.dtype), dk.to(k.dtype), dv.to(v.dtype), dg.to(g.dtype), None#, None, None
+
+def fla_chunk_simple_gla(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g: torch.Tensor,  # log decay
+) -> torch.Tensor:
+    scale = 1.0
+    o = SimpleGLAFunction.apply(q, k, v, g, scale)
+    return o
 
 if is_flash_attn_2_available():
     from transformers.modeling_flash_attention_utils import _flash_attention_forward
@@ -353,7 +728,6 @@ class Qwen2Attention(nn.Module):
 
         return attn_output, attn_weights, past_key_value
 
-
 class Qwen2FlashAttention2(Qwen2Attention):
     """
     Qwen2 flash attention module, following Qwen2 attention module. This module inherits from `Qwen2Attention`
@@ -594,13 +968,170 @@ class Qwen2SdpaAttention(Qwen2Attention):
 
         return attn_output, None, past_key_value
 
-
 QWEN2_ATTENTION_CLASSES = {
     "eager": Qwen2Attention,
     "flash_attention_2": Qwen2FlashAttention2,
     "sdpa": Qwen2SdpaAttention,
 }
 
+class Qwen2RWKV6cSimple(Qwen2Attention):
+    """
+    Qwen2 RWKV-6cSimple attention module, following Qwen2 attention module. This module inherits from `Qwen2Attention`
+    and adds RWKV specific weights for tokenshift, decay, time_first, and the final layernorm.
+    """
+
+    # Copied from transformers.models.llama.modeling_llama.LlamaFlashAttention2.__init__
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        n_layer = self.config.num_hidden_layers
+        n_embd = dim_att = self.hidden_size
+        layer_id = self.layer_idx
+
+        with torch.no_grad():
+            ratio_0_to_1 = layer_id / (n_layer - 1)  # 0 to 1
+            ratio_1_to_almost0 = 1.0 - (layer_id / n_layer)  # 1 to ~0
+            ddd = torch.ones(1, 1, n_embd)
+            for i in range(n_embd):
+                ddd[0, 0, i] = i / n_embd
+
+            # self.time_maa_x = nn.Parameter(1.0 - torch.pow(ddd, ratio_1_to_almost0))
+            # self.time_maa_r = nn.Parameter(1.0 - torch.pow(ddd, 0.5 * ratio_1_to_almost0))
+            # self.time_maa_k = nn.Parameter(1.0 - torch.pow(ddd, ratio_1_to_almost0))
+            # self.time_maa_v = nn.Parameter(1.0 - (torch.pow(ddd, ratio_1_to_almost0) + 0.3 * ratio_0_to_1))
+            # self.time_maa_w = nn.Parameter(1.0 - torch.pow(ddd, ratio_1_to_almost0))
+
+            ddd = torch.zeros(1, 1, n_embd)
+            self.time_maa_x = nn.Parameter(1.0 - torch.pow(ddd, ratio_1_to_almost0))
+            self.time_maa_r = nn.Parameter(torch.zeros_like(ddd))
+            self.time_maa_k = nn.Parameter(torch.zeros_like(ddd))
+            self.time_maa_v = nn.Parameter(torch.zeros_like(ddd))
+            self.time_maa_w = nn.Parameter(torch.zeros_like(ddd))
+
+            D_MIX_LORA = 32 if n_embd < 4096 else 64
+            self.time_maa_w2 = nn.Parameter(torch.zeros(4, D_MIX_LORA, n_embd).uniform_(-0.01, 0.01))
+            self.time_maa_w1 = nn.Parameter(torch.zeros(n_embd, D_MIX_LORA*self.time_maa_w2.size(0)))
+
+            # per-head RWKV-6
+            H = self.num_heads
+            # fancy time_decay
+            decay_speed = torch.ones(H)
+            for h in range(H):
+                decay_speed[h] = -6 + 5 * (h / max(H - 1, 1)) ** (0.7 + 1.3 * ratio_0_to_1)
+            self.time_decay = nn.Parameter(decay_speed)
+            D_DECAY_LORA = 64 if n_embd < 4096 else 128
+            self.time_decay_w1 = nn.Parameter(torch.zeros(n_embd, D_DECAY_LORA))
+            self.time_decay_w2 = nn.Parameter(torch.zeros(D_DECAY_LORA, H).uniform_(-0.01, 0.01))
+
+            # # RWKV-6
+            # decay_speed = torch.ones(dim_att)
+            # for n in range(dim_att):
+            #     decay_speed[n] = -6 + 5 * (n / (dim_att - 1)) ** (0.7 + 1.3 * ratio_0_to_1)
+            # self.time_decay = nn.Parameter(decay_speed.reshape(1,1,dim_att))
+            # D_DECAY_LORA = 64 if n_embd < 4096 else 128
+            # self.time_decay_w1 = nn.Parameter(torch.zeros(n_embd, D_DECAY_LORA))
+            # self.time_decay_w2 = nn.Parameter(torch.zeros(D_DECAY_LORA, dim_att).uniform_(-0.01, 0.01))
+            # tmp = torch.zeros(dim_att)
+            # for n in range(dim_att):
+            #     zigzag = ((n + 1) % 3 - 1) * 0.1
+            #     tmp[n] = ratio_0_to_1 * (1 - (n / (dim_att - 1))) + zigzag
+            # self.time_faaaa = nn.Parameter(tmp.reshape(self.n_head, self.head_size))
+
+        self.ln_x = nn.LayerNorm(dim_att)
+
+    def segsum(self, w_log): # B H L 1
+        w_log_cumsum = torch.cumsum(w_log, dim=-2) # (B, H, L, 1)
+        w_mask = torch.exp((w_log_cumsum - w_log_cumsum.mT).tril()).tril() # (B, H, L, L)
+        return w_mask
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_value: Optional[Cache] = None,
+        output_attentions: bool = False,
+        use_cache: bool = False,
+        cache_position: Optional[torch.LongTensor] = None,
+    ):
+        bsz, q_len, hidden_dim = hidden_states.size()
+        H = self.num_heads
+
+        x = hidden_states
+        dxprev = torch.nn.functional.pad(x, (0, 0, -1, 1)) - x
+
+        xxx = x + dxprev * self.time_maa_x
+        xxx = torch.tanh(xxx @ self.time_maa_w1).view(bsz*q_len, self.time_maa_w2.size(0), -1).transpose(0, 1)
+        xxx = torch.bmm(xxx, self.time_maa_w2).view(self.time_maa_w2.size(0), bsz, q_len, hidden_dim)
+
+        mr, mk, mv, mw = xxx.unbind(dim=0)
+        xr = x + dxprev * (self.time_maa_r + mr)
+        xk = x + dxprev * (self.time_maa_k + mk)
+        xv = x + dxprev * (self.time_maa_v + mv)
+        xw = x + dxprev * (self.time_maa_w + mw)
+
+        query_states = self.q_proj(xr)
+        key_states = self.k_proj(xk)
+        value_states = self.v_proj(xv)
+        decay_states = (self.time_decay + torch.tanh(xw @ self.time_decay_w1) @ self.time_decay_w2).to(query_states.dtype)
+
+        query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
+        key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+        value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+        decay_states = decay_states.view(bsz, q_len, self.num_heads, 1).transpose(1, 2)
+
+        # repeat k/v heads if n_kv_heads < n_heads
+        key_states = repeat_kv(key_states, self.num_key_value_groups)
+        value_states = repeat_kv(value_states, self.num_key_value_groups)
+        dropout_rate = 0.0 if not self.training else self.attention_dropout
+
+        decay_states_log = -decay_states.exp()
+        key_states = (key_states * (1 - decay_states_log.exp())).to(key_states.dtype)
+
+        # In PEFT, usually we cast the layer norms in float32 for training stability reasons
+        # therefore the input hidden states gets silently casted in float32. Hence, we need
+        # cast them back in float16 just to be sure everything works as expected.
+        input_dtype = query_states.dtype
+        if input_dtype == torch.float32:
+            if torch.is_autocast_enabled():
+                target_dtype = torch.get_autocast_gpu_dtype()
+            # Handle the case where the model is quantized
+            elif hasattr(self.config, "_pre_quantization_dtype"):
+                target_dtype = self.config._pre_quantization_dtype
+            else:
+                target_dtype = self.q_proj.weight.dtype
+
+            logger.warning_once(
+                f"The input hidden states seems to be silently casted in float32, this might be related to"
+                f" the fact you have upcasted embedding or layer norm layers in float32. We will cast back the input in"
+                f" {target_dtype}."
+            )
+
+            query_states = query_states.to(target_dtype)
+            key_states = key_states.to(target_dtype)
+            value_states = value_states.to(target_dtype)
+
+        # decay_states_log.view is to match fla_chunk_simple_gla's requirements
+        attn_output = fla_chunk_simple_gla(query_states, key_states, value_states, decay_states_log.view(bsz, self.num_heads, q_len))
+
+        attn_output = attn_output.transpose(1, 2).contiguous()
+        attn_output = attn_output.view(bsz, q_len, self.hidden_size)
+
+        attn_output = self.ln_x(attn_output)
+        attn_output = self.o_proj(attn_output)
+
+        if not output_attentions:
+            attn_weights = None
+        else:
+            attn_weights = query_states @ key_states.mT
+            attn_weights = attn_weights * self.segsum(decay_states_log)
+            # FIXME - the attention weights need to pass through normalization somehow, since they have no denominator...
+            # but we can't divide by the denominator (sum of each row) here, because it could be negative or have negative components!
+            #eps = 1e-8
+            #attn_weights = attn_weights / (attn_weights.sum(-1, keepdim=True) + eps)
+            attn_weights = attn_weights.to(query_states.dtype)
+
+        return attn_output, attn_weights, past_key_value
 
 class Qwen2DecoderLayer(nn.Module):
     def __init__(self, config: Qwen2Config, layer_idx: int):
@@ -612,7 +1143,7 @@ class Qwen2DecoderLayer(nn.Module):
                 f"Sliding Window Attention is enabled but not implemented for `{config._attn_implementation}`; "
                 "unexpected results may be encountered."
             )
-        self.self_attn = QWEN2_ATTENTION_CLASSES[config._attn_implementation](config, layer_idx)
+        self.self_attn = (QWEN2_ATTENTION_CLASSES[config._attn_implementation] if not config.rwkv else Qwen2RWKV6cSimple)(config, layer_idx)
 
         self.mlp = Qwen2MLP(config)
         self.input_layernorm = Qwen2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -625,6 +1156,7 @@ class Qwen2DecoderLayer(nn.Module):
         position_ids: Optional[torch.LongTensor] = None,
         past_key_value: Optional[Tuple[torch.Tensor]] = None,
         output_attentions: Optional[bool] = False,
+        output_attention_hidden_states: Optional[bool] = False,
         use_cache: Optional[bool] = False,
         cache_position: Optional[torch.LongTensor] = None,
         **kwargs,
@@ -653,7 +1185,7 @@ class Qwen2DecoderLayer(nn.Module):
         hidden_states = self.input_layernorm(hidden_states)
 
         # Self Attention
-        hidden_states, self_attn_weights, present_key_value = self.self_attn(
+        post_attention_hidden_states, self_attn_weights, present_key_value = self.self_attn(
             hidden_states=hidden_states,
             attention_mask=attention_mask,
             position_ids=position_ids,
@@ -662,7 +1194,7 @@ class Qwen2DecoderLayer(nn.Module):
             use_cache=use_cache,
             cache_position=cache_position,
         )
-        hidden_states = residual + hidden_states
+        hidden_states = residual + post_attention_hidden_states
 
         # Fully Connected
         residual = hidden_states
@@ -675,10 +1207,92 @@ class Qwen2DecoderLayer(nn.Module):
         if output_attentions:
             outputs += (self_attn_weights,)
 
+        if output_attention_hidden_states:
+            outputs += (post_attention_hidden_states,)
+
         if use_cache:
             outputs += (present_key_value,)
 
         return outputs
+
+
+
+from transformers.utils import ModelOutput
+from dataclasses import dataclass
+
+@dataclass
+class BaseModelOutputWithPastAndAttentionHiddenStates(ModelOutput):
+    """
+    Base class for model's outputs that may also contain a past key/values (to speed up sequential decoding).
+
+    Args:
+        last_hidden_state (`torch.FloatTensor` of shape `(batch_size, sequence_length, hidden_size)`):
+            Sequence of hidden-states at the output of the last layer of the model.
+
+            If `past_key_values` is used only the last hidden-state of the sequences of shape `(batch_size, 1,
+            hidden_size)` is output.
+        past_key_values (`tuple(tuple(torch.FloatTensor))`, *optional*, returned when `use_cache=True` is passed or when `config.use_cache=True`):
+            Tuple of `tuple(torch.FloatTensor)` of length `config.n_layers`, with each tuple having 2 tensors of shape
+            `(batch_size, num_heads, sequence_length, embed_size_per_head)`) and optionally if
+            `config.is_encoder_decoder=True` 2 additional tensors of shape `(batch_size, num_heads,
+            encoder_sequence_length, embed_size_per_head)`.
+
+            Contains pre-computed hidden-states (key and values in the self-attention blocks and optionally if
+            `config.is_encoder_decoder=True` in the cross-attention blocks) that can be used (see `past_key_values`
+            input) to speed up sequential decoding.
+        hidden_states (`tuple(torch.FloatTensor)`, *optional*, returned when `output_hidden_states=True` is passed or when `config.output_hidden_states=True`):
+            Tuple of `torch.FloatTensor` (one for the output of the embeddings, if the model has an embedding layer, +
+            one for the output of each layer) of shape `(batch_size, sequence_length, hidden_size)`.
+
+            Hidden-states of the model at the output of each layer plus the optional initial embedding outputs.
+        attentions (`tuple(torch.FloatTensor)`, *optional*, returned when `output_attentions=True` is passed or when `config.output_attentions=True`):
+            Tuple of `torch.FloatTensor` (one for each layer) of shape `(batch_size, num_heads, sequence_length,
+            sequence_length)`.
+
+            Attentions weights after the attention softmax, used to compute the weighted average in the self-attention
+            heads.
+    """
+    last_hidden_state: torch.FloatTensor = None
+    past_key_values: Optional[Tuple[Tuple[torch.FloatTensor]]] = None
+    hidden_states: Optional[Tuple[torch.FloatTensor, ...]] = None
+    attentions: Optional[Tuple[torch.FloatTensor, ...]] = None
+    attention_hidden_states: Optional[Tuple[torch.FloatTensor, ...]] = None
+
+@dataclass
+class CausalLMOutputWithPastAndAttentionHiddenStates(ModelOutput):
+    """
+    Base class for causal language model (or autoregressive) outputs.
+
+    Args:
+        loss (`torch.FloatTensor` of shape `(1,)`, *optional*, returned when `labels` is provided):
+            Language modeling loss (for next-token prediction).
+        logits (`torch.FloatTensor` of shape `(batch_size, sequence_length, config.vocab_size)`):
+            Prediction scores of the language modeling head (scores for each vocabulary token before SoftMax).
+        past_key_values (`tuple(tuple(torch.FloatTensor))`, *optional*, returned when `use_cache=True` is passed or when `config.use_cache=True`):
+            Tuple of `tuple(torch.FloatTensor)` of length `config.n_layers`, with each tuple having 2 tensors of shape
+            `(batch_size, num_heads, sequence_length, embed_size_per_head)`)
+
+            Contains pre-computed hidden-states (key and values in the self-attention blocks) that can be used (see
+            `past_key_values` input) to speed up sequential decoding.
+        hidden_states (`tuple(torch.FloatTensor)`, *optional*, returned when `output_hidden_states=True` is passed or when `config.output_hidden_states=True`):
+            Tuple of `torch.FloatTensor` (one for the output of the embeddings, if the model has an embedding layer, +
+            one for the output of each layer) of shape `(batch_size, sequence_length, hidden_size)`.
+
+            Hidden-states of the model at the output of each layer plus the optional initial embedding outputs.
+        attentions (`tuple(torch.FloatTensor)`, *optional*, returned when `output_attentions=True` is passed or when `config.output_attentions=True`):
+            Tuple of `torch.FloatTensor` (one for each layer) of shape `(batch_size, num_heads, sequence_length,
+            sequence_length)`.
+
+            Attentions weights after the attention softmax, used to compute the weighted average in the self-attention
+            heads.
+    """
+    loss: Optional[torch.FloatTensor] = None
+    logits: torch.FloatTensor = None
+    past_key_values: Optional[Tuple[Tuple[torch.FloatTensor]]] = None
+    hidden_states: Optional[Tuple[torch.FloatTensor, ...]] = None
+    attentions: Optional[Tuple[torch.FloatTensor, ...]] = None
+    attention_hidden_states: Optional[Tuple[torch.FloatTensor, ...]] = None
+    
 
 
 QWEN2_START_DOCSTRING = r"""
@@ -786,6 +1400,9 @@ QWEN2_INPUTS_DOCSTRING = r"""
         output_attentions (`bool`, *optional*):
             Whether or not to return the attentions tensors of all attention layers. See `attentions` under returned
             tensors for more detail.
+        output_attention_hidden_states (`bool`, *optional*):
+            Whether or not to return the hidden states of all attention layers. See `hidden_states` under returned tensors for
+            more detail.
         output_hidden_states (`bool`, *optional*):
             Whether or not to return the hidden states of all layers. See `hidden_states` under returned tensors for
             more detail.
@@ -832,6 +1449,20 @@ class Qwen2Model(Qwen2PreTrainedModel):
     def set_input_embeddings(self, value):
         self.embed_tokens = value
 
+    def forward_attentions(self, all_hidden_states_in:Tuple[torch.Tensor], output_attentions=True, output_attention_hidden_states=True):
+        all_self_attns = ()
+        all_hidden_states_out = ()
+        for decoder_layer in self.layers:
+            layer_idx = decoder_layer.self_attn.layer_idx
+            hidden_states, self_attn_weights, present_key_value = decoder_layer.self_attn(all_hidden_states_in[layer_idx], output_attentions=True)            
+            all_hidden_states_out += (hidden_states,)
+            all_self_attns += (self_attn_weights,)
+            
+        return BaseModelOutputWithPastAndAttentionHiddenStates(
+            attentions=all_self_attns if output_attentions else None,
+            attention_hidden_states=all_hidden_states_out if output_attention_hidden_states else None,
+        )
+
     @add_start_docstrings_to_model_forward(QWEN2_INPUTS_DOCSTRING)
     def forward(
         self,
@@ -842,11 +1473,13 @@ class Qwen2Model(Qwen2PreTrainedModel):
         inputs_embeds: Optional[torch.FloatTensor] = None,
         use_cache: Optional[bool] = None,
         output_attentions: Optional[bool] = None,
+        output_attention_hidden_states: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
-    ) -> Union[Tuple, BaseModelOutputWithPast]:
+    ) -> Union[Tuple, BaseModelOutputWithPastAndAttentionHiddenStates]:
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
+        output_attention_hidden_states if output_attention_hidden_states is not None else self.config.output_attention_hidden_states
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         )
@@ -893,6 +1526,7 @@ class Qwen2Model(Qwen2PreTrainedModel):
         hidden_states = inputs_embeds
 
         # decoder layers
+        all_attention_hidden_states = () if output_attention_hidden_states else None
         all_hidden_states = () if output_hidden_states else None
         all_self_attns = () if output_attentions else None
         next_decoder_cache = None
@@ -909,6 +1543,7 @@ class Qwen2Model(Qwen2PreTrainedModel):
                     position_ids,
                     past_key_values,
                     output_attentions,
+                    output_attention_hidden_states,
                     use_cache,
                     cache_position,
                 )
@@ -919,17 +1554,24 @@ class Qwen2Model(Qwen2PreTrainedModel):
                     position_ids=position_ids,
                     past_key_value=past_key_values,
                     output_attentions=output_attentions,
+                    output_attention_hidden_states=output_attention_hidden_states,
                     use_cache=use_cache,
                     cache_position=cache_position,
                 )
 
             hidden_states = layer_outputs[0]
 
+            int_output_attentions = int(bool(output_attentions))
+            int_output_attention_hidden_states = int(bool(output_attention_hidden_states))
+
             if use_cache:
-                next_decoder_cache = layer_outputs[2 if output_attentions else 1]
+                next_decoder_cache = layer_outputs[1 + int_output_attentions + int_output_attention_hidden_states]
 
             if output_attentions:
                 all_self_attns += (layer_outputs[1],)
+            
+            if output_attention_hidden_states:
+                all_attention_hidden_states += (layer_outputs[1 + int_output_attentions],)
 
         hidden_states = self.norm(hidden_states)
 
@@ -943,11 +1585,12 @@ class Qwen2Model(Qwen2PreTrainedModel):
 
         if not return_dict:
             return tuple(v for v in [hidden_states, next_cache, all_hidden_states, all_self_attns] if v is not None)
-        return BaseModelOutputWithPast(
+        return BaseModelOutputWithPastAndAttentionHiddenStates(
             last_hidden_state=hidden_states,
             past_key_values=next_cache,
             hidden_states=all_hidden_states,
             attentions=all_self_attns,
+            attention_hidden_states=all_attention_hidden_states,
         )
 
     # Copied from transformers.models.llama.modeling_llama.LlamaModel._update_causal_mask
@@ -1026,11 +1669,13 @@ class Qwen2Model(Qwen2PreTrainedModel):
 class Qwen2ForCausalLM(Qwen2PreTrainedModel):
     _tied_weights_keys = ["lm_head.weight"]
 
-    def __init__(self, config):
+    def __init__(self, config, my_config):
         super().__init__(config)
         self.model = Qwen2Model(config)
         self.vocab_size = config.vocab_size
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+
+        self.my_config = my_config
 
         # Initialize weights and apply final processing
         self.post_init()
@@ -1053,8 +1698,11 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel):
     def get_decoder(self):
         return self.model
 
+    def forward_attentions(self, all_hidden_states:Tuple[torch.Tensor], output_attentions=True, output_attention_hidden_states=True):
+        return self.model.forward_attentions(all_hidden_states, output_attentions, output_attention_hidden_states)
+
     @add_start_docstrings_to_model_forward(QWEN2_INPUTS_DOCSTRING)
-    @replace_return_docstrings(output_type=CausalLMOutputWithPast, config_class=_CONFIG_FOR_DOC)
+    @replace_return_docstrings(output_type=CausalLMOutputWithPastAndAttentionHiddenStates, config_class=_CONFIG_FOR_DOC)
     def forward(
         self,
         input_ids: torch.LongTensor = None,
@@ -1065,11 +1713,12 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel):
         labels: Optional[torch.LongTensor] = None,
         use_cache: Optional[bool] = None,
         output_attentions: Optional[bool] = None,
+        output_attention_hidden_states: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
         num_logits_to_keep: int = 0,
-    ) -> Union[Tuple, CausalLMOutputWithPast]:
+    ) -> Union[Tuple, CausalLMOutputWithPastAndAttentionHiddenStates]:
         r"""
         Args:
             labels (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):
@@ -1102,12 +1751,13 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel):
         ```"""
 
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
+        output_attention_hidden_states = output_attention_hidden_states if output_attention_hidden_states is not None else self.config.output_attention_hidden_states
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         )
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
-        # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
+        # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn, dec_attn_hidden_states)
         outputs = self.model(
             input_ids=input_ids,
             attention_mask=attention_mask,
@@ -1116,6 +1766,7 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel):
             inputs_embeds=inputs_embeds,
             use_cache=use_cache,
             output_attentions=output_attentions,
+            output_attention_hidden_states=output_attention_hidden_states,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
             cache_position=cache_position,
@@ -1149,12 +1800,13 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel):
             output = (logits,) + outputs[1:]
             return (loss,) + output if loss is not None else output
 
-        return CausalLMOutputWithPast(
+        return CausalLMOutputWithPastAndAttentionHiddenStates(
             loss=loss,
             logits=logits,
             past_key_values=outputs.past_key_values,
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
+            attention_hidden_states=outputs.attention_hidden_states,
         )
 
     # Copied from transformers.models.llama.modeling_llama.LlamaForCausalLM.prepare_inputs_for_generation
@@ -1230,7 +1882,41 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel):
         )
         return model_inputs
 
+    def get_optim_groups(self):
+        # separates groups for weight decay and non-weight decay
 
+        train_config = self.my_config.train
+
+        lr_decay = set()
+        lr_1x = set()
+        for n, p in self.named_parameters():
+            if not p.requires_grad:
+                continue
+            if (len(p.squeeze().shape) >= 2) and (train_config.weight_decay > 0):
+                lr_decay.add(n)
+            else:
+                lr_1x.add(n)
+
+        param_dict = {n: p for n, p in self.named_parameters()}
+        param_check = list(lr_decay) + list(lr_1x)
+        if not train_config.load_partial:
+            assert sorted(param_dict) == sorted(param_check)
+
+        lr_decay = sorted(list(lr_decay))
+        lr_1x = sorted(list(lr_1x))
+        
+        print('decay', lr_decay, '\n')
+        print('1x', lr_1x, '\n')
+
+        
+        optim_groups = [
+            {"params": [param_dict[n] for n in lr_1x], "weight_decay": 0.0, "my_lr_scale": 1.0, 'name':'lr_1x'},
+        ]
+        if len(lr_decay) > 0:
+            optim_groups += [{"params": [param_dict[n] for n in lr_decay], "weight_decay": train_config.weight_decay, "my_lr_scale": 1.0, 'name':'lr_decay'}]
+
+        return optim_groups
+    
 @add_start_docstrings(
     """
     The Qwen2 Model transformer with a sequence classification head on top (linear layer).

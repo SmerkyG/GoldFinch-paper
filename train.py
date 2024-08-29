@@ -152,7 +152,7 @@ if __name__ == "__main__":
 
     from src.lit import LightningModelWrapper
     from src.model import Transformer
-    from qwen2.modeling_qwen2rwkv6csimple import Qwen2ForCausalLM
+    from qwen2.modeling_qwen2 import Qwen2ForCausalLM
     from qwen2.configuration_qwen2 import Qwen2Config
 
     from safetensors.torch import load_file

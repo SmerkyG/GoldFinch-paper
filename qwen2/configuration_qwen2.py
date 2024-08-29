@@ -110,6 +110,8 @@ class Qwen2Config(PretrainedConfig):
         sliding_window=4096,
         max_window_layers=28,
         attention_dropout=0.0,
+        output_attention_hidden_states=False,
+        rwkv=False,
         **kwargs,
     ):
         self.vocab_size = vocab_size
@@ -122,6 +124,8 @@ class Qwen2Config(PretrainedConfig):
         self.sliding_window = sliding_window if use_sliding_window else None
         self.max_window_layers = max_window_layers
 
+        self.output_attention_hidden_states = output_attention_hidden_states
+
         # for backward compatibility
         if num_key_value_heads is None:
             num_key_value_heads = num_attention_heads
@@ -133,6 +137,7 @@ class Qwen2Config(PretrainedConfig):
         self.use_cache = use_cache
         self.rope_theta = rope_theta
         self.attention_dropout = attention_dropout
+        self.rwkv = rwkv
 
         super().__init__(
             tie_word_embeddings=tie_word_embeddings,
