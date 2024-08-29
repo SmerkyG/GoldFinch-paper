@@ -1449,18 +1449,21 @@ class Qwen2Model(Qwen2PreTrainedModel):
     def set_input_embeddings(self, value):
         self.embed_tokens = value
 
-    def forward_attentions(self, all_hidden_states_in:Tuple[torch.Tensor], output_attentions=True, output_post_attention_hidden_states=True):
+    def forward_attentions(self, all_hidden_states:Tuple[torch.Tensor], output_attentions=True, output_post_attention_hidden_states=True):
         all_self_attns = ()
-        all_post_attention_hidden_states_out = ()
+        all_post_attention_hidden_states = ()
         for decoder_layer in self.layers:
             layer_idx = decoder_layer.self_attn.layer_idx
-            hidden_states, self_attn_weights, present_key_value = decoder_layer.self_attn(all_hidden_states_in[layer_idx], output_attentions=True)            
-            all_post_attention_hidden_states_out += (hidden_states,)
-            all_self_attns += (self_attn_weights,)
+            hidden_states = decoder_layer.input_layernorm(all_hidden_states[layer_idx])
+            post_attention_hidden_states, self_attn_weights, present_key_value = decoder_layer.self_attn(hidden_states, output_attentions=output_attentions)
+            if output_post_attention_hidden_states:
+                all_post_attention_hidden_states += (post_attention_hidden_states,)
+            if output_attentions:
+                all_self_attns += (self_attn_weights,)
             
         return BaseModelOutputWithPastAndAttentionHiddenStates(
             attentions=all_self_attns if output_attentions else None,
-            post_attention_hidden_states=all_post_attention_hidden_states_out if output_post_attention_hidden_states else None,
+            post_attention_hidden_states=all_post_attention_hidden_states if output_post_attention_hidden_states else None,
         )
 
     @add_start_docstrings_to_model_forward(QWEN2_INPUTS_DOCSTRING)
