@@ -1156,7 +1156,7 @@ class Qwen2DecoderLayer(nn.Module):
         position_ids: Optional[torch.LongTensor] = None,
         past_key_value: Optional[Tuple[torch.Tensor]] = None,
         output_attentions: Optional[bool] = False,
-        output_attention_hidden_states: Optional[bool] = False,
+        output_post_attention_hidden_states: Optional[bool] = False,
         use_cache: Optional[bool] = False,
         cache_position: Optional[torch.LongTensor] = None,
         **kwargs,
@@ -1207,7 +1207,7 @@ class Qwen2DecoderLayer(nn.Module):
         if output_attentions:
             outputs += (self_attn_weights,)
 
-        if output_attention_hidden_states:
+        if output_post_attention_hidden_states:
             outputs += (post_attention_hidden_states,)
 
         if use_cache:
@@ -1256,7 +1256,7 @@ class BaseModelOutputWithPastAndAttentionHiddenStates(ModelOutput):
     past_key_values: Optional[Tuple[Tuple[torch.FloatTensor]]] = None
     hidden_states: Optional[Tuple[torch.FloatTensor, ...]] = None
     attentions: Optional[Tuple[torch.FloatTensor, ...]] = None
-    attention_hidden_states: Optional[Tuple[torch.FloatTensor, ...]] = None
+    post_attention_hidden_states: Optional[Tuple[torch.FloatTensor, ...]] = None
 
 @dataclass
 class CausalLMOutputWithPastAndAttentionHiddenStates(ModelOutput):
@@ -1291,7 +1291,7 @@ class CausalLMOutputWithPastAndAttentionHiddenStates(ModelOutput):
     past_key_values: Optional[Tuple[Tuple[torch.FloatTensor]]] = None
     hidden_states: Optional[Tuple[torch.FloatTensor, ...]] = None
     attentions: Optional[Tuple[torch.FloatTensor, ...]] = None
-    attention_hidden_states: Optional[Tuple[torch.FloatTensor, ...]] = None
+    post_attention_hidden_states: Optional[Tuple[torch.FloatTensor, ...]] = None
     
 
 
@@ -1400,7 +1400,7 @@ QWEN2_INPUTS_DOCSTRING = r"""
         output_attentions (`bool`, *optional*):
             Whether or not to return the attentions tensors of all attention layers. See `attentions` under returned
             tensors for more detail.
-        output_attention_hidden_states (`bool`, *optional*):
+        output_post_attention_hidden_states (`bool`, *optional*):
             Whether or not to return the hidden states of all attention layers. See `hidden_states` under returned tensors for
             more detail.
         output_hidden_states (`bool`, *optional*):
@@ -1449,18 +1449,18 @@ class Qwen2Model(Qwen2PreTrainedModel):
     def set_input_embeddings(self, value):
         self.embed_tokens = value
 
-    def forward_attentions(self, all_hidden_states_in:Tuple[torch.Tensor], output_attentions=True, output_attention_hidden_states=True):
+    def forward_attentions(self, all_hidden_states_in:Tuple[torch.Tensor], output_attentions=True, output_post_attention_hidden_states=True):
         all_self_attns = ()
-        all_hidden_states_out = ()
+        all_post_attention_hidden_states_out = ()
         for decoder_layer in self.layers:
             layer_idx = decoder_layer.self_attn.layer_idx
             hidden_states, self_attn_weights, present_key_value = decoder_layer.self_attn(all_hidden_states_in[layer_idx], output_attentions=True)            
-            all_hidden_states_out += (hidden_states,)
+            all_post_attention_hidden_states_out += (hidden_states,)
             all_self_attns += (self_attn_weights,)
             
         return BaseModelOutputWithPastAndAttentionHiddenStates(
             attentions=all_self_attns if output_attentions else None,
-            attention_hidden_states=all_hidden_states_out if output_attention_hidden_states else None,
+            post_attention_hidden_states=all_post_attention_hidden_states_out if output_post_attention_hidden_states else None,
         )
 
     @add_start_docstrings_to_model_forward(QWEN2_INPUTS_DOCSTRING)
@@ -1473,13 +1473,13 @@ class Qwen2Model(Qwen2PreTrainedModel):
         inputs_embeds: Optional[torch.FloatTensor] = None,
         use_cache: Optional[bool] = None,
         output_attentions: Optional[bool] = None,
-        output_attention_hidden_states: Optional[bool] = None,
+        output_post_attention_hidden_states: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
     ) -> Union[Tuple, BaseModelOutputWithPastAndAttentionHiddenStates]:
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_attention_hidden_states if output_attention_hidden_states is not None else self.config.output_attention_hidden_states
+        output_post_attention_hidden_states if output_post_attention_hidden_states is not None else self.config.output_post_attention_hidden_states
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         )
@@ -1526,7 +1526,7 @@ class Qwen2Model(Qwen2PreTrainedModel):
         hidden_states = inputs_embeds
 
         # decoder layers
-        all_attention_hidden_states = () if output_attention_hidden_states else None
+        all_post_attention_hidden_states = () if output_post_attention_hidden_states else None
         all_hidden_states = () if output_hidden_states else None
         all_self_attns = () if output_attentions else None
         next_decoder_cache = None
@@ -1543,7 +1543,7 @@ class Qwen2Model(Qwen2PreTrainedModel):
                     position_ids,
                     past_key_values,
                     output_attentions,
-                    output_attention_hidden_states,
+                    output_post_attention_hidden_states,
                     use_cache,
                     cache_position,
                 )
@@ -1554,7 +1554,7 @@ class Qwen2Model(Qwen2PreTrainedModel):
                     position_ids=position_ids,
                     past_key_value=past_key_values,
                     output_attentions=output_attentions,
-                    output_attention_hidden_states=output_attention_hidden_states,
+                    output_post_attention_hidden_states=output_post_attention_hidden_states,
                     use_cache=use_cache,
                     cache_position=cache_position,
                 )
@@ -1562,16 +1562,16 @@ class Qwen2Model(Qwen2PreTrainedModel):
             hidden_states = layer_outputs[0]
 
             int_output_attentions = int(bool(output_attentions))
-            int_output_attention_hidden_states = int(bool(output_attention_hidden_states))
+            int_output_post_attention_hidden_states = int(bool(output_post_attention_hidden_states))
 
             if use_cache:
-                next_decoder_cache = layer_outputs[1 + int_output_attentions + int_output_attention_hidden_states]
+                next_decoder_cache = layer_outputs[1 + int_output_attentions + int_output_post_attention_hidden_states]
 
             if output_attentions:
                 all_self_attns += (layer_outputs[1],)
             
-            if output_attention_hidden_states:
-                all_attention_hidden_states += (layer_outputs[1 + int_output_attentions],)
+            if output_post_attention_hidden_states:
+                all_post_attention_hidden_states += (layer_outputs[1 + int_output_attentions],)
 
         hidden_states = self.norm(hidden_states)
 
@@ -1590,7 +1590,7 @@ class Qwen2Model(Qwen2PreTrainedModel):
             past_key_values=next_cache,
             hidden_states=all_hidden_states,
             attentions=all_self_attns,
-            attention_hidden_states=all_attention_hidden_states,
+            post_attention_hidden_states=all_post_attention_hidden_states,
         )
 
     # Copied from transformers.models.llama.modeling_llama.LlamaModel._update_causal_mask
@@ -1698,8 +1698,8 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel):
     def get_decoder(self):
         return self.model
 
-    def forward_attentions(self, all_hidden_states:Tuple[torch.Tensor], output_attentions=True, output_attention_hidden_states=True):
-        return self.model.forward_attentions(all_hidden_states, output_attentions, output_attention_hidden_states)
+    def forward_attentions(self, all_hidden_states:Tuple[torch.Tensor], output_attentions=True, output_post_attention_hidden_states=True):
+        return self.model.forward_attentions(all_hidden_states, output_attentions, output_post_attention_hidden_states)
 
     @add_start_docstrings_to_model_forward(QWEN2_INPUTS_DOCSTRING)
     @replace_return_docstrings(output_type=CausalLMOutputWithPastAndAttentionHiddenStates, config_class=_CONFIG_FOR_DOC)
@@ -1713,7 +1713,7 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel):
         labels: Optional[torch.LongTensor] = None,
         use_cache: Optional[bool] = None,
         output_attentions: Optional[bool] = None,
-        output_attention_hidden_states: Optional[bool] = None,
+        output_post_attention_hidden_states: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
@@ -1751,7 +1751,7 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel):
         ```"""
 
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_attention_hidden_states = output_attention_hidden_states if output_attention_hidden_states is not None else self.config.output_attention_hidden_states
+        output_post_attention_hidden_states = output_post_attention_hidden_states if output_post_attention_hidden_states is not None else self.config.output_post_attention_hidden_states
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         )
@@ -1766,7 +1766,7 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel):
             inputs_embeds=inputs_embeds,
             use_cache=use_cache,
             output_attentions=output_attentions,
-            output_attention_hidden_states=output_attention_hidden_states,
+            output_post_attention_hidden_states=output_post_attention_hidden_states,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
             cache_position=cache_position,
@@ -1806,7 +1806,7 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel):
             past_key_values=outputs.past_key_values,
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
-            attention_hidden_states=outputs.attention_hidden_states,
+            post_attention_hidden_states=outputs.post_attention_hidden_states,
         )
 
     # Copied from transformers.models.llama.modeling_llama.LlamaForCausalLM.prepare_inputs_for_generation

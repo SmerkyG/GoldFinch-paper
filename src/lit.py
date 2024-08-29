@@ -77,15 +77,15 @@ class LightningModelWrapper(pl.LightningModule):
         if self.training and self.teacher is not None and self.config.train.teacher.attention_distillation_stage in (1, 2):
             stage = self.config.train.teacher.attention_distillation_stage
             output_attentions = stage == 1
-            output_attention_hidden_states = stage == 2
+            output_post_attention_hidden_states = stage == 2
             # FIXME - special code for attention matrix loss
             with torch.no_grad():
-                teacher_results = self.teacher.forward(x, return_dict=True, output_hidden_states=True, output_attentions=output_attentions, output_attention_hidden_states=output_attention_hidden_states)
-            student_results = self.model.forward_attentions(teacher_results.hidden_states, output_attentions=output_attentions, output_attention_hidden_states=output_attention_hidden_states)
+                teacher_results = self.teacher.forward(x, return_dict=True, output_hidden_states=True, output_attentions=output_attentions, output_post_attention_hidden_states=output_post_attention_hidden_states)
+            student_results = self.model.forward_attentions(teacher_results.hidden_states, output_attentions=output_attentions, output_post_attention_hidden_states=output_post_attention_hidden_states)
             if stage == 1:
                 reported_loss = training_loss = torch.linalg.matrix_norm(torch.cat(teacher_results.attentions, dim=0) - torch.cat(student_results.attentions, dim=0)).mean() / teacher_results.attentions[0].size(-1)
             else: # stage == 2:
-                reported_loss = training_loss = torch.linalg.vector_norm(torch.cat(teacher_results.attention_hidden_states, dim=0) - torch.cat(student_results.attention_hidden_states, dim=0), dim=-1).mean() * (student_results.attention_hidden_states[0].size(-1) ** -0.5)
+                reported_loss = training_loss = torch.linalg.vector_norm(torch.cat(teacher_results.post_attention_hidden_states, dim=0) - torch.cat(student_results.post_attention_hidden_states, dim=0), dim=-1).mean() * (student_results.post_attention_hidden_states[0].size(-1) ** -0.5)
             logits = torch.tensor([], device=x.device)
             preds = torch.zeros_like(y)
             return reported_loss, training_loss, logits, preds, last_model_state

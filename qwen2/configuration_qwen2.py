@@ -110,7 +110,7 @@ class Qwen2Config(PretrainedConfig):
         sliding_window=4096,
         max_window_layers=28,
         attention_dropout=0.0,
-        output_attention_hidden_states=False,
+        output_post_attention_hidden_states=False,
         rwkv=False,
         **kwargs,
     ):
@@ -124,7 +124,7 @@ class Qwen2Config(PretrainedConfig):
         self.sliding_window = sliding_window if use_sliding_window else None
         self.max_window_layers = max_window_layers
 
-        self.output_attention_hidden_states = output_attention_hidden_states
+        self.output_post_attention_hidden_states = output_post_attention_hidden_states
 
         # for backward compatibility
         if num_key_value_heads is None:
