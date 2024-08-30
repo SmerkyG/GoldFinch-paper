@@ -1090,6 +1090,7 @@ class Qwen2RWKV6cSimple(Qwen2Attention):
         dropout_rate = 0.0 if not self.training else self.attention_dropout
 
         decay_states_log = -decay_states.exp()
+        decay_states_log = decay_states_log.clamp(-5) # FIXME - is this necessary?
         key_states = (key_states * (1 - decay_states_log.exp())).to(key_states.dtype)
 
         # In PEFT, usually we cast the layer norms in float32 for training stability reasons
