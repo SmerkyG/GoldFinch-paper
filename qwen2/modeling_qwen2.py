@@ -756,7 +756,7 @@ class Qwen2RWKV6cSimple(Qwen2Attention):
             value_states = value_states.to(target_dtype)
 
         # decay_states_log.view is to match fla_chunk_simple_gla's requirements
-        attn_output = fla_chunk_simple_gla(query_states, key_states, value_states, decay_states_log.view(bsz, self.num_heads, q_len))
+        attn_output = chunk_simple_gla(query_states, key_states, value_states, decay_states_log.view(bsz, self.num_heads, q_len))[0]
 
         attn_output = attn_output.transpose(1, 2).contiguous()
         attn_output = attn_output.view(bsz, q_len, self.hidden_size)
