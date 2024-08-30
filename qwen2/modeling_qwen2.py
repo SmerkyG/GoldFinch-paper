@@ -1093,13 +1093,13 @@ class Qwen2Model(Qwen2PreTrainedModel):
     def set_input_embeddings(self, value):
         self.embed_tokens = value
 
-    def forward_attentions(self, all_hidden_states:Tuple[torch.Tensor], output_attentions=True, output_post_attention_hidden_states=True):
+    def forward_attentions(self, all_hidden_states:Tuple[torch.Tensor], attention_mask:Optional[torch.Tensor], output_attentions=True, output_post_attention_hidden_states=True):
         all_self_attns = ()
         all_post_attention_hidden_states = ()
         for decoder_layer in self.layers:
             layer_idx = decoder_layer.self_attn.layer_idx
             hidden_states = decoder_layer.input_layernorm(all_hidden_states[layer_idx])
-            post_attention_hidden_states, self_attn_weights, present_key_value = decoder_layer.self_attn(hidden_states, output_attentions=output_attentions)
+            post_attention_hidden_states, self_attn_weights, present_key_value = decoder_layer.self_attn(hidden_states, attention_mask=attention_mask, output_attentions=output_attentions)
             if output_post_attention_hidden_states:
                 all_post_attention_hidden_states += (post_attention_hidden_states,)
             if output_attentions:
@@ -1345,8 +1345,8 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel):
     def get_decoder(self):
         return self.model
 
-    def forward_attentions(self, all_hidden_states:Tuple[torch.Tensor], output_attentions=True, output_post_attention_hidden_states=True):
-        return self.model.forward_attentions(all_hidden_states, output_attentions, output_post_attention_hidden_states)
+    def forward_attentions(self, all_hidden_states:Tuple[torch.Tensor], attention_mask:Optional[torch.Tensor], output_attentions=True, output_post_attention_hidden_states=True):
+        return self.model.forward_attentions(all_hidden_states, attention_mask=attention_mask, output_attentions=output_attentions, output_post_attention_hidden_states=output_post_attention_hidden_states)
 
     @add_start_docstrings_to_model_forward(QWEN2_INPUTS_DOCSTRING)
     @replace_return_docstrings(output_type=CausalLMOutputWithPastAndAttentionHiddenStates, config_class=_CONFIG_FOR_DOC)
