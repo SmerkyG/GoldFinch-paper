@@ -1,6 +1,6 @@
 model:
     __type__: configs.Transformer_Config
-    tmix: qwen2
+    tmix: qwen2rwkv
     ctx_len: 512 # 4096
     vocab_size: 151936
 
