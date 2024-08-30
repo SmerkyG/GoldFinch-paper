@@ -90,7 +90,15 @@ class LightningModelWrapper(pl.LightningModule):
             preds = torch.zeros_like(y)
             return reported_loss, training_loss, logits, preds, last_model_state
 
-        logits, next_model_state = self(x, last_model_state)
+        results = self.model(x, output_hidden_states=True) #, last_model_state)
+        if isinstance(results, tuple):
+            logits, next_model_state = results
+        elif isinstance(results, torch.Tensor):
+            logits = results
+            next_model_state = last_model_state
+        else:
+            logits = results.logits
+            next_model_state = last_model_state
     
         reported_loss = training_loss = F.cross_entropy(logits.view(-1, logits.size(-1)), y.flatten())
         with torch.no_grad():
@@ -98,7 +106,13 @@ class LightningModelWrapper(pl.LightningModule):
 
         if self.training and self.teacher is not None and self.config.train.teacher.attention_distillation_stage in (0, 3):
             with torch.no_grad():
-                teacher_logits, _ = self.teacher.forward(x)
+                teacher_results = self.teacher.forward(x)
+                if isinstance(teacher_results, tuple):
+                    teacher_logits, _ = teacher_results
+                elif isinstance(results, torch.Tensor):
+                    teacher_logits = teacher_results
+                else:
+                    teacher_logits = teacher_results.logits
             distillation_loss = F.kl_div(
                 F.log_softmax(logits.view(-1, logits.size(-1)), dim=-1),
                 F.log_softmax(teacher_logits.view(-1, logits.size(-1)), dim=-1),
