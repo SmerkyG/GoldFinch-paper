@@ -94,7 +94,10 @@ class LightningModelWrapper(pl.LightningModule):
             preds = torch.zeros_like(y)
             return reported_loss, training_loss, logits, preds, last_model_state
 
-        results = self.model(x, output_hidden_states=True) #, last_model_state)
+        if self.config.model.tmix.lower().startswith('qwen2'):
+            results = self.model(x, attention_mask=causal_mask, output_hidden_states=False)
+        else:
+            results = self.model(x, last_model_state)
         if isinstance(results, tuple):
             logits, next_model_state = results
         elif isinstance(results, torch.Tensor):
