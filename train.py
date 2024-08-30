@@ -177,6 +177,31 @@ if __name__ == "__main__":
                         gradient_clip_val=config.train.gradient_clip_val, 
                         val_check_interval=config.train.val_check_interval)
 
+    qwen_cfg = {
+        "attention_dropout": 0.0,
+        "bos_token_id": 151643,
+        "eos_token_id": 151643,
+        "hidden_act": "silu",
+        "hidden_size": 896,
+        "initializer_range": 0.02,
+        "intermediate_size": 4864,
+        "max_position_embeddings": 131072,
+        "max_window_layers": 24,
+        "model_type": "qwen2",
+        "num_attention_heads": 14,
+        "num_hidden_layers": 24,
+        "num_key_value_heads": 2,
+        "rms_norm_eps": 1e-06,
+        "rope_theta": 1000000.0,
+        "sliding_window": 131072,
+        "tie_word_embeddings": True,
+        "torch_dtype": "bfloat16",
+        "transformers_version": "4.40.1",
+        "use_cache": False, #True,
+        "use_sliding_window": False,
+        "vocab_size": 151936,
+    }
+
     teacher = None
     if config.train.train_stage > 1:
         teacher_config = config.train.teacher
@@ -186,32 +211,8 @@ if __name__ == "__main__":
             else:
                 load_dict = torch.load(teacher_config.path, map_location="cpu")
             with trainer.init_module(empty_init=True):
-                if teacher_config.model.tmix == 'qwen2':
-                    cfg = {
-                        "attention_dropout": 0.0,
-                        "bos_token_id": 151643,
-                        "eos_token_id": 151643,
-                        "hidden_act": "silu",
-                        "hidden_size": 896,
-                        "initializer_range": 0.02,
-                        "intermediate_size": 4864,
-                        "max_position_embeddings": 131072,
-                        "max_window_layers": 24,
-                        "model_type": "qwen2",
-                        "num_attention_heads": 14,
-                        "num_hidden_layers": 24,
-                        "num_key_value_heads": 2,
-                        "rms_norm_eps": 1e-06,
-                        "rope_theta": 1000000.0,
-                        "sliding_window": 131072,
-                        "tie_word_embeddings": True,
-                        "torch_dtype": "bfloat16",
-                        "transformers_version": "4.40.1",
-                        "use_cache": True,
-                        "use_sliding_window": False,
-                        "vocab_size": 151936,
-                    }
-                    teacher = Qwen2ForCausalLM(Qwen2Config(**cfg), teacher_config)
+                if teacher_config.model.tmix.startswith('qwen2'):
+                    teacher = Qwen2ForCausalLM(Qwen2Config(rwkv='rwkv' in teacher_config.model.tmix, **qwen_cfg), teacher_config)
                     load_dict['lm_head.weight'] = load_dict['model.embed_tokens.weight']
                 else:
                     teacher = Transformer(teacher_config)
@@ -220,8 +221,8 @@ if __name__ == "__main__":
             teacher.requires_grad_(False)
 
     with trainer.init_module(empty_init=not config.train.load_partial):
-        if config.model.tmix == 'qwen2':
-            model = Qwen2ForCausalLM(Qwen2Config(rwkv=True, **cfg), config)
+        if config.model.tmix.startswith('qwen2'):
+            model = Qwen2ForCausalLM(Qwen2Config(rwkv='rwkv' in config.model.tmix, **qwen_cfg), config)
         else:
             model = Transformer(config)
                 
@@ -229,7 +230,11 @@ if __name__ == "__main__":
         
     if config.train.train_stage == 1:  # should we build the initial weights?
         init_weight_name = f"{config.runtime.proj_path}/rwkv-init.pth"
-        mm = model.generate_init_weight()
+        if config.model.tmix.startswith("qwen2"):
+            model.apply(model._init_weights)
+            mm = {k: v.cpu() for k, v in model.state_dict().items()} #model.state_dict()
+        else:
+            mm = model.generate_init_weight()
         print(f"Save to {init_weight_name}...")
         torch.save(mm, init_weight_name)
         print("Done. Now go for stage 2.")
