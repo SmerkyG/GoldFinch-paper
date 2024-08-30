@@ -719,10 +719,6 @@ class Qwen2RWKV6cSimple(Qwen2Attention):
         value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
         decay_states = decay_states.view(bsz, q_len, self.num_heads, 1).transpose(1, 2)
 
-        kv_seq_len = key_states.shape[-2]
-        cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
-        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
-
         # repeat k/v heads if n_kv_heads < n_heads
         key_states = repeat_kv(key_states, self.num_key_value_groups)
         value_states = repeat_kv(value_states, self.num_key_value_groups)
@@ -731,6 +727,10 @@ class Qwen2RWKV6cSimple(Qwen2Attention):
         decay_states_log = -decay_states.exp()
         decay_states_log = decay_states_log.clamp(-5) # FIXME - is this necessary?
         key_states = (key_states * (1 - decay_states_log.exp())).to(key_states.dtype)
+
+        kv_seq_len = key_states.shape[-2]
+        cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
+        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
 
         # In PEFT, usually we cast the layer norms in float32 for training stability reasons
         # therefore the input hidden states gets silently casted in float32. Hence, we need
