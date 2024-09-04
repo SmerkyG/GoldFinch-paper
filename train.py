@@ -302,15 +302,11 @@ if __name__ == "__main__":
     if config.model.tmix.startswith('qwen2'):
         if config.train.grad_cp:
             if "deepspeed" in config.train.strategy:
-                # FIXME - why is this having a weird issue where whatever it's passing as hidden_states seems to have 2 not 3 dims?
-                model._set_gradient_checkpointing(True, deepspeed.checkpointing.checkpoint)
+                model._gradient_checkpointing_func = deepspeed.checkpointing.checkpoint
+                model.gradient_checkpointing = True
             else:
                 model.gradient_checkpointing_enable()
-            if teacher is not None:
-                if "deepspeed" in config.train.strategy:
-                    teacher._set_gradient_checkpointing(True, deepspeed.checkpointing.checkpoint)
-                else:
-                    teacher.gradient_checkpointing_enable()
+
         if os.getenv("RWKV_TORCH_COMPILE", '0').lower() in ['1', 'true']:
             model = torch.compile(model)
             if teacher is not None:
