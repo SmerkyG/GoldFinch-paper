@@ -90,8 +90,7 @@ class LightningModelWrapper(pl.LightningModule):
                     teacher_results = self.teacher.forward(x, return_dict=True, attention_mask=causal_mask, output_hidden_states=True, output_attentions=output_attentions, output_post_attention_hidden_states=output_post_attention_hidden_states)
 
             if self.config.model.classname.lower().startswith('qwen2'):
-                teacher_results_hidden_states = teacher_results[2]
-                student_results = self.model.forward_attentions(teacher_results_hidden_states, output_attentions=output_attentions, output_post_attention_hidden_states=output_post_attention_hidden_states)
+                student_results = self.model.forward_attentions(teacher_results.hidden_states, last_model_state=last_model_state, output_attentions=output_attentions, output_post_attention_hidden_states=output_post_attention_hidden_states)
             else:
                 student_results = self.model.forward_attentions(teacher_results.hidden_states, attention_mask=causal_mask, output_attentions=output_attentions, output_post_attention_hidden_states=output_post_attention_hidden_states)
             if stage == 1:

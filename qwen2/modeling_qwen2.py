@@ -68,6 +68,8 @@ def fla_chunk_simple_gla(
     v: torch.Tensor,
     g: torch.Tensor,  # log decay
 ) -> Tuple[torch.Tensor, torch.Tensor]:
+    assert q.dim() == k.dim() == v.dim() == 4, "q, k, v must have 4 dimensions (b, h, l, d)"
+    assert q.dtype == k.dtype == v.dtype, "q, k, v must have the same dtype"
     scale = k.shape[-1] ** -0.5
     g = g.float()
     initial_state = None

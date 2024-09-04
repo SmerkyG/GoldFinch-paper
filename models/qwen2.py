@@ -4,7 +4,7 @@ import torch.utils.checkpoint
 import torch.nn as nn
 from torch.nn import functional as F
 from torch import Tensor
-from typing import Tuple
+from typing import Tuple, Optional
 
 from src.state import ModelState, BlockState, ChannelMixState, TimeMixState, Shared
 
@@ -13,6 +13,8 @@ from configs import TrainerCLI_Config, Model_Config, Transformer_Config, Train_C
 from src.rotary import generate_rotary_embedding, generate_binary_rotary_embedding, apply_rotary_embedding
 
 from src.CoreDependencies import *
+
+from dataclasses import dataclass
 
 import torch.utils.checkpoint
 if importlib.util.find_spec('deepspeed'):
@@ -26,6 +28,8 @@ def fla_chunk_simple_gla(
     v: torch.Tensor,
     g: torch.Tensor,  # log decay
 ) -> Tuple[torch.Tensor, torch.Tensor]:
+    assert q.dim() == k.dim() == v.dim() == 4, "q, k, v must have 4 dimensions (b, h, l, d)"
+    assert q.dtype == k.dtype == v.dtype, "q, k, v must have the same dtype"
     scale = k.shape[-1] ** -0.5
     g = g.float()
     initial_state = None
@@ -101,6 +105,14 @@ def get_tmix_default_state(x:Tensor, config:Transformer_Config, requires_grad:bo
         torch.zeros([B, C], dtype=x.dtype, device=x.device, requires_grad=requires_grad)
     )
 
+@dataclass
+class LLMOutput:
+    logits: torch.FloatTensor = None
+    model_state: ModelState = None
+    hidden_states: Optional[Tuple[torch.FloatTensor, ...]] = None
+    attentions: Optional[Tuple[torch.FloatTensor, ...]] = None
+    post_attention_hidden_states: Optional[Tuple[torch.FloatTensor, ...]] = None
+
 class TMix_qwen2(nn.Module):
     def get_default_state_factory(self): return get_tmix_default_state
 
@@ -167,6 +179,8 @@ class TMix_qwen2(nn.Module):
         #cos, sin = self.rotary_emb(v, seq_len=kv_seq_len)
         cos, sin = shared.angles.unbind(0)
         q, k = apply_rotary_pos_emb(q, k, cos, sin)
+        q = q.to(v.dtype)
+        k = k.to(v.dtype)
 
         # repeat k/v heads if n_kv_heads < n_heads
         k = repeat_kv(k, self.num_key_value_groups)
@@ -177,13 +191,13 @@ class TMix_qwen2(nn.Module):
             causal_mask = torch.full([L, L], fill_value=-torch.inf, device=attn_weights.device, dtype=attn_weights.dtype).triu(1)
             attn_weights = attn_weights + causal_mask
 
-            # upcast attention to fp32
+            # # upcast attention to fp32
             attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(q.dtype)
             #attn_weights = nn.functional.dropout(attn_weights, p=self.attention_dropout, training=self.training)
             y = torch.matmul(attn_weights, v)
         else:
             attn_weights = torch.empty(0, device=x.device)
-        y = nn.functional.scaled_dot_product_attention(q, k, v, dropout_p=0.0, is_causal=is_causal)
+            y = nn.functional.scaled_dot_product_attention(q, k, v, dropout_p=0.0, is_causal=is_causal)
         y = y.transpose(1,2).reshape(B,L,D)
         y = self.o_proj(y)
         return y, TimeMixState(wkv_state, last_state.shift_state), attn_weights
@@ -301,6 +315,8 @@ class TMix_qwen2rwkv(TMix_qwen2):
         # query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)#, position_ids)
         cos, sin = shared.angles.unbind(0)
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
+        query_states = query_states.to(value_states.dtype)
+        key_states = key_states.to(value_states.dtype)
 
         # # In PEFT, usually we cast the layer norms in float32 for training stability reasons
         # # therefore the input hidden states gets silently casted in float32. Hence, we need
@@ -326,11 +342,11 @@ class TMix_qwen2rwkv(TMix_qwen2):
         #     value_states = value_states.to(target_dtype)
 
         # decay_states_log.view is to match fla_chunk_simple_gla's requirements
-        #print("layer", self.layer_idx, "pre ", bool(query_states.isnan().any()), bool(key_states.isnan().any()), bool(value_states.isnan().any()), bool(decay_states_log.isnan().any()))
+        #print("layer", self.layer_id, "pre ", bool(query_states.isnan().any()), bool(key_states.isnan().any()), bool(value_states.isnan().any()), bool(decay_states_log.isnan().any()))
         attn_output = fla_chunk_simple_gla(query_states, key_states, value_states, decay_states_log.view(bsz, self.num_heads, q_len))[0]
         #o = chunk_simple_gla(q.contiguous(), k.contiguous(), v.contiguous(), g.contiguous(), scale)
 
-        #print("layer", self.layer_idx, "post", bool(query_states.isnan().any()), bool(key_states.isnan().any()), bool(value_states.isnan().any()), bool(decay_states_log.isnan().any()))
+        #print("layer", self.layer_id, "post", bool(query_states.isnan().any()), bool(key_states.isnan().any()), bool(value_states.isnan().any()), bool(decay_states_log.isnan().any()))
 
         attn_output = attn_output.transpose(1, 2).contiguous()
         attn_output = attn_output.view(bsz, q_len, self.hidden_size)
@@ -373,7 +389,7 @@ class CMix_qwen2(nn.Module):
         return self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x)), last_state
 
 class Qwen2DecoderLayer(nn.Module):
-    def __init__(self, config:TrainerCLI_Config, layer_idx:int):
+    def __init__(self, config:TrainerCLI_Config, layer_id:int):
         super().__init__()
 
         self.config = config
@@ -386,8 +402,8 @@ class Qwen2DecoderLayer(nn.Module):
         tmix_factory = TMix_qwen2
         if config.model.attention_type == 'rwkv':
             tmix_factory = TMix_qwen2rwkv
-        tmix = tmix_factory(args, layer_idx)
-        cmix = CMix_qwen2(args, layer_idx)
+        tmix = tmix_factory(args, layer_id)
+        cmix = CMix_qwen2(args, layer_id)
 
         self.default_time_mix_state_factory = tmix.get_default_state_factory() if hasattr(tmix, 'get_default_state_factory') else lambda x, c, r: TimeMixState()
         self.self_attn = TJIT(tmix)
@@ -429,39 +445,20 @@ class Qwen2Decoder(nn.Module):
 
         self.embed_tokens = nn.Embedding(args.vocab_size, args.n_embd, args.vocab_padding_idx)
         self.layers = nn.ModuleList(
-            [Qwen2DecoderLayer(config, layer_idx) for layer_idx in range(args.n_layer)]
+            [Qwen2DecoderLayer(config, layer_id) for layer_id in range(args.n_layer)]
         )
         self.norm = Qwen2RMSNorm(args.n_embd, eps=args.rms_norm_eps)
 
-    def forward_attentions(self, all_hidden_states:Tuple[torch.Tensor], output_attentions=True, output_post_attention_hidden_states=True):
-        attentions_outputs, post_attention_hidden_states_outputs = (), ()
-        for decoder_layer in self.layers:
-            layer_idx = decoder_layer.self_attn.layer_idx
-            hidden_states = decoder_layer.input_layernorm(all_hidden_states[layer_idx])
-            post_attention_hidden_states, last_timemix_state, attentions = decoder_layer.self_attn(hidden_states, output_attentions=output_attentions)
-            if output_post_attention_hidden_states:
-                post_attention_hidden_states_outputs += (post_attention_hidden_states,)
-            if output_attentions:
-                attentions_outputs += (attentions,)
-
-        return attentions_outputs, post_attention_hidden_states_outputs
-
-    def forward(self, token_ids:Tensor|list, last_model_state:ModelState|None = None, output_hidden_states:bool=False, output_attentions:bool=False, output_post_attention_hidden_states:bool=False):
+    def forward_preamble(self, x, last_model_state:ModelState|None = None, ):
         config : Transformer_Config = self.config.model
-        if isinstance(token_ids, Tensor):
-            B, T = token_ids.size()
-        else:
-            B = 1
-            T = len(token_ids)
-            token_ids = torch.tensor(token_ids, device=self.emb.weight.device, dtype=torch.long, requires_grad=False)[None, :]
+
+        B, T, C = x.size()
 
         shared = self.shared
         if config.rope is not None and shared.angles.size(0) == 0:
             shared.angles = generate_rotary_embedding(config.ctx_len, config.head_size, config.rope.base * config.rope.rebase, config.rope.rescale).to(self.norm.weight)
 
         assert (shared.angles.size(0) == 0 or T <= shared.angles.size(0)) or (shared.bias_mask.size(0) == 0 or T <= shared.bias_mask.size(0))
-
-        x = self.embed_tokens(token_ids)
 
         # might need to be true in the future for BPTT support
         requires_grad = self.training
@@ -474,11 +471,44 @@ class Qwen2Decoder(nn.Module):
                     layer.default_channel_mix_state_factory(x, config, requires_grad),
                 ))
 
+        return last_model_state
+
+
+    def forward_attentions(self, all_hidden_states:Tuple[torch.Tensor], last_model_state:ModelState|None = None, output_attentions=True, output_post_attention_hidden_states=True):
+        last_model_state = self.forward_preamble(all_hidden_states[0], last_model_state)
+
+        attentions_outputs, post_attention_hidden_states_outputs = (), ()
+
+        for decoder_layer in self.layers:
+            layer_id = decoder_layer.self_attn.layer_id
+            hidden_states = decoder_layer.input_layernorm(all_hidden_states[layer_id])
+            post_attention_hidden_states, last_timemix_state, attentions = decoder_layer.self_attn(hidden_states, last_model_state, self.shared, output_attentions=output_attentions)
+            if output_post_attention_hidden_states:
+                post_attention_hidden_states_outputs += (post_attention_hidden_states,)
+            if output_attentions:
+                attentions_outputs += (attentions,)
+
+        return LLMOutput(None, last_model_state, None, attentions_outputs, post_attention_hidden_states_outputs)
+        #return attentions_outputs, post_attention_hidden_states_outputs
+
+    def forward(self, token_ids:Tensor|list, last_model_state:ModelState|None = None, output_hidden_states:bool=False, output_attentions:bool=False, output_post_attention_hidden_states:bool=False):
+        config : Transformer_Config = self.config.model
+        if isinstance(token_ids, Tensor):
+            B, T = token_ids.size()
+        else:
+            B = 1
+            T = len(token_ids)
+            token_ids = torch.tensor(token_ids, device=self.emb.weight.device, dtype=torch.long, requires_grad=False)[None, :]
+
+        x = self.embed_tokens(token_ids)
+
+        last_model_state = self.forward_preamble(x, last_model_state)
+
         hidden_states_outputs, attentions_outputs, post_attention_hidden_states_outputs = (), (), ()
         if output_hidden_states:
             hidden_states_outputs += (x,)
         for decoder_layer in self.layers:
-            x, s, attentions, post_attention_hidden_states = ckpt(decoder_layer, x, last_model_state, shared, output_attentions, output_post_attention_hidden_states)
+            x, s, attentions, post_attention_hidden_states = ckpt(decoder_layer, x, last_model_state, self.shared, output_attentions, output_post_attention_hidden_states)
             hidden_states_outputs += (x,)
             if output_attentions:
                 attentions_outputs += (attentions,)
@@ -486,7 +516,8 @@ class Qwen2Decoder(nn.Module):
                 post_attention_hidden_states_outputs += (post_attention_hidden_states,)
 
         x = self.norm(x)
-        return x, last_model_state, hidden_states_outputs, attentions_outputs, post_attention_hidden_states_outputs # FIXME - not updating state at all
+        return LLMOutput(x, last_model_state, hidden_states_outputs, attentions_outputs, post_attention_hidden_states_outputs)
+        #return x, last_model_state, hidden_states_outputs, attentions_outputs, post_attention_hidden_states_outputs # FIXME - not updating state at all
 
 class Model_qwen2(nn.Module): # Qwen2CausalLM
     def __init__(self, config:TrainerCLI_Config):
@@ -505,12 +536,13 @@ class Model_qwen2(nn.Module): # Qwen2CausalLM
 
         self.lm_head = nn.Linear(args.n_embd, args.vocab_size, bias=False)
 
-    def forward_attentions(self, all_hidden_states:Tuple[torch.Tensor], output_attentions=True, output_post_attention_hidden_states=True):
-        return self.model.forward_attentions(all_hidden_states, output_attentions=output_attentions, output_post_attention_hidden_states=output_post_attention_hidden_states)
+    def forward_attentions(self, all_hidden_states:Tuple[torch.Tensor], last_model_state:ModelState|None = None, output_attentions=True, output_post_attention_hidden_states=True):
+        return self.model.forward_attentions(all_hidden_states, last_model_state=last_model_state, output_attentions=output_attentions, output_post_attention_hidden_states=output_post_attention_hidden_states)
 
     def forward(self, token_ids:Tensor|list, last_model_state:ModelState|None = None, output_hidden_states:bool=False, output_attentions:bool=False, output_post_attention_hidden_states:bool=False):
-        x, s, hidden_states_outputs, attention_outputs, post_attention_hidden_states_outputs = self.model(token_ids)
-        return self.lm_head(x), s, hidden_states_outputs, attention_outputs, post_attention_hidden_states_outputs
+        return self.model(token_ids, last_model_state=last_model_state, output_hidden_states=output_hidden_states, output_attentions=output_attentions, output_post_attention_hidden_states=output_post_attention_hidden_states)
+        # x, s, hidden_states_outputs, attention_outputs, post_attention_hidden_states_outputs = self.model(token_ids)
+        # return self.lm_head(x), s, hidden_states_outputs, attention_outputs, post_attention_hidden_states_outputs
     
     def get_optim_groups(self):
         # separates groups for weight decay and non-weight decay
