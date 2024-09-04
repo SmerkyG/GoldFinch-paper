@@ -60,7 +60,21 @@ import triton.language as tl
 
 #from fla.utils import contiguous
 
-from fla.ops.simple_gla.chunk import chunk_simple_gla
+from fla.ops.simple_gla.chunk import chunk_simple_gla, SimpleGLAFunction
+
+def fla_chunk_simple_gla(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g: torch.Tensor,  # log decay
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    scale = k.shape[-1] ** -0.5
+    g = g.float()
+    initial_state = None
+    output_final_state = False
+    checkpoint_level = 1
+    o, final_state = SimpleGLAFunction.apply(q, k, v, g, scale, initial_state, output_final_state, checkpoint_level)
+    return o, final_state
 
 
 if is_flash_attn_2_available():
@@ -757,7 +771,7 @@ class Qwen2RWKV6cSimple(Qwen2Attention):
             value_states = value_states.to(target_dtype)
 
         # decay_states_log.view is to match fla_chunk_simple_gla's requirements
-        attn_output = chunk_simple_gla(query_states, key_states, value_states, decay_states_log.view(bsz, self.num_heads, q_len))[0]
+        attn_output = fla_chunk_simple_gla(query_states, key_states, value_states, decay_states_log.view(bsz, self.num_heads, q_len))[0]
 
         attn_output = attn_output.transpose(1, 2).contiguous()
         attn_output = attn_output.view(bsz, q_len, self.hidden_size)
