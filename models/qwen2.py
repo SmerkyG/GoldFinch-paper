@@ -18,7 +18,22 @@ import torch.utils.checkpoint
 if importlib.util.find_spec('deepspeed'):
     import deepspeed
 
-from fla.ops.simple_gla.chunk import chunk_simple_gla
+from fla.ops.simple_gla.chunk import chunk_simple_gla, SimpleGLAFunction
+
+def fla_chunk_simple_gla(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g: torch.Tensor,  # log decay
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    scale = k.shape[-1] ** -0.5
+    g = g.float()
+    initial_state = None
+    output_final_state = False
+    checkpoint_level = 1
+    o, final_state = SimpleGLAFunction.apply(q, k, v, g, scale, initial_state, output_final_state, checkpoint_level)
+    return o, final_state
+
 
 # Copied from transformers.models.llama.modeling_llama.LlamaRMSNorm with Llama->Qwen2
 class Qwen2RMSNorm(nn.Module):
@@ -168,7 +183,7 @@ class TMix_qwen2(nn.Module):
             y = torch.matmul(attn_weights, v)
         else:
             attn_weights = torch.empty(0, device=x.device)
-            y = nn.functional.scaled_dot_product_attention(q, k, v, dropout_p=0.0, is_causal=is_causal)
+        y = nn.functional.scaled_dot_product_attention(q, k, v, dropout_p=0.0, is_causal=is_causal)
         y = y.transpose(1,2).reshape(B,L,D)
         y = self.o_proj(y)
         return y, TimeMixState(wkv_state, last_state.shift_state), attn_weights
@@ -312,7 +327,7 @@ class TMix_qwen2rwkv(TMix_qwen2):
 
         # decay_states_log.view is to match fla_chunk_simple_gla's requirements
         #print("layer", self.layer_idx, "pre ", bool(query_states.isnan().any()), bool(key_states.isnan().any()), bool(value_states.isnan().any()), bool(decay_states_log.isnan().any()))
-        attn_output = chunk_simple_gla(query_states, key_states, value_states, decay_states_log.view(bsz, self.num_heads, q_len))[0]
+        attn_output = fla_chunk_simple_gla(query_states, key_states, value_states, decay_states_log.view(bsz, self.num_heads, q_len))[0]
         #o = chunk_simple_gla(q.contiguous(), k.contiguous(), v.contiguous(), g.contiguous(), scale)
 
         #print("layer", self.layer_idx, "post", bool(query_states.isnan().any()), bool(key_states.isnan().any()), bool(value_states.isnan().any()), bool(decay_states_log.isnan().any()))
@@ -329,7 +344,7 @@ class TMix_qwen2rwkv(TMix_qwen2):
             attn_weights = query_states @ key_states.mT
             attn_weights = attn_weights * self.segsum(decay_states_log)
             attn_weights = attn_weights.to(query_states.dtype)
-
+    
         return attn_output, TimeMixState(last_state.wkv_state, last_state.shift_state), attn_weights #, past_key_value
     
 def get_cmix_default_state(x:Tensor, config:Transformer_Config, requires_grad:bool):
