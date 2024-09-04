@@ -50,7 +50,7 @@ class MyDataset(Dataset):
         magic_prime = config.train.magic_prime
         data = self.data
 
-        assert config.train.train_stage > 0
+        assert config.train.train_stage >= 0
         ii = 1 + epoch * self.samples_per_epoch + (idx * world_size) + rank
 
         factor = (math.sqrt(5) - 1) / 2

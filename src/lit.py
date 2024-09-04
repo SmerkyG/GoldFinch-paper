@@ -84,8 +84,16 @@ class LightningModelWrapper(pl.LightningModule):
             output_post_attention_hidden_states = stage == 2
             # FIXME - special code for attention matrix loss
             with torch.no_grad():
-                teacher_results = self.teacher.forward(x, return_dict=True, attention_mask=causal_mask, output_hidden_states=True, output_attentions=output_attentions, output_post_attention_hidden_states=output_post_attention_hidden_states)
-            student_results = self.model.forward_attentions(teacher_results.hidden_states, attention_mask=causal_mask, output_attentions=output_attentions, output_post_attention_hidden_states=output_post_attention_hidden_states)
+                if self.config.model.classname.lower().startswith('qwen2'):
+                    teacher_results = self.teacher.forward(x, output_hidden_states=True, output_attentions=output_attentions, output_post_attention_hidden_states=output_post_attention_hidden_states)
+                else:
+                    teacher_results = self.teacher.forward(x, return_dict=True, attention_mask=causal_mask, output_hidden_states=True, output_attentions=output_attentions, output_post_attention_hidden_states=output_post_attention_hidden_states)
+
+            if self.config.model.classname.lower().startswith('qwen2'):
+                teacher_results_hidden_states = teacher_results[2]
+                student_results = self.model.forward_attentions(teacher_results_hidden_states, output_attentions=output_attentions, output_post_attention_hidden_states=output_post_attention_hidden_states)
+            else:
+                student_results = self.model.forward_attentions(teacher_results.hidden_states, attention_mask=causal_mask, output_attentions=output_attentions, output_post_attention_hidden_states=output_post_attention_hidden_states)
             if stage == 1:
                 reported_loss = training_loss = torch.linalg.matrix_norm(torch.cat(teacher_results.attentions, dim=0) - torch.cat(student_results.attentions, dim=0)).mean() / teacher_results.attentions[0].size(-1)
             else: # stage == 2:
@@ -94,12 +102,15 @@ class LightningModelWrapper(pl.LightningModule):
             preds = torch.zeros_like(y)
             return reported_loss, training_loss, logits, preds, last_model_state
 
-        if self.config.model.tmix.lower().startswith('qwen2'):
+        if self.config.model.classname.lower().startswith('qwen2'):
+            results = self.model(x, last_model_state, output_hidden_states=False)
+        elif self.config.model.tmix.lower().startswith('qwen2'):
             results = self.model(x, attention_mask=causal_mask, output_hidden_states=False)
         else:
             results = self.model(x, last_model_state)
         if isinstance(results, tuple):
-            logits, next_model_state = results
+            logits = results[0]
+            next_model_state = results[1]
         elif isinstance(results, torch.Tensor):
             logits = results
             next_model_state = last_model_state
@@ -115,7 +126,7 @@ class LightningModelWrapper(pl.LightningModule):
             with torch.no_grad():
                 teacher_results = self.teacher.forward(x)
                 if isinstance(teacher_results, tuple):
-                    teacher_logits, _ = teacher_results
+                    teacher_logits = teacher_results[0]
                 elif isinstance(results, torch.Tensor):
                     teacher_logits = teacher_results
                 else:

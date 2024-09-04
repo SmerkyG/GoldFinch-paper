@@ -18,6 +18,8 @@ if __name__ == "__main__":
     import numpy as np
     import torch
     from torch.utils.data import DataLoader
+
+    from pydoc import locate
   
     config, errors = parse_cmdline_configs(sys.argv[1:])
     if errors != '':
@@ -56,7 +58,7 @@ if __name__ == "__main__":
     if not os.path.exists(config.runtime.proj_path):
         os.makedirs(config.runtime.proj_path)
 
-    assert config.train.train_stage > 0
+    assert config.train.train_stage >= 0
 
     EPOCH_SAMPLE_SIZE = 40320
     runtime_config.epoch_count = config.train.magic_prime // EPOCH_SAMPLE_SIZE
@@ -211,7 +213,17 @@ if __name__ == "__main__":
             else:
                 load_dict = torch.load(teacher_config.path, map_location="cpu")
             with trainer.init_module(empty_init=True):
-                if teacher_config.model.tmix.startswith('qwen2'):
+                classname = teacher_config.model.classname
+                if classname != '':
+                    teacher_classpath = f'models.{classname}.Model_{classname}'
+                    teacher_factory = locate(teacher_classpath)
+                    if teacher_factory is None:
+                        print(f"Unsupported teacher model type: {teacher_classpath}")
+                        exit(0)
+                    teacher = teacher_factory(teacher_config)
+                    if classname.startswith('qwen2'):
+                        load_dict['lm_head.weight'] = load_dict['model.embed_tokens.weight']
+                elif teacher_config.model.tmix.startswith('qwen2'):
                     teacher = Qwen2ForCausalLM(Qwen2Config(rwkv='rwkv' in teacher_config.model.tmix, **qwen_cfg), teacher_config)
                     load_dict['lm_head.weight'] = load_dict['model.embed_tokens.weight']
                 else:
@@ -221,17 +233,26 @@ if __name__ == "__main__":
             teacher.requires_grad_(False)
 
     with trainer.init_module(empty_init=not config.train.load_partial):
-        if config.model.tmix.startswith('qwen2'):
+        classname = config.model.classname
+        if classname != '':
+            model_classpath = f'models.{classname}.Model_{classname}'
+            model_factory = locate(model_classpath)
+            if model_factory is None:
+                print(f"Unsupported model type: {model_classpath}")
+                exit(0)
+            model = model_factory(config)
+        elif config.model.tmix.startswith('qwen2'):
             model = Qwen2ForCausalLM(Qwen2Config(rwkv='rwkv' in config.model.tmix, **qwen_cfg), config)
         else:
             model = Transformer(config)
                 
-        wrapper = LightningModelWrapper(model, config, teacher)
-        
     if config.train.train_stage == 1:  # should we build the initial weights?
         init_weight_name = f"{config.runtime.proj_path}/rwkv-init.pth"
-        if config.model.tmix.startswith("qwen2"):
+        if classname != '':
+            pass # FIXME
+        elif config.model.tmix.startswith("qwen2"):
             model.apply(model._init_weights)
+            model.init_all_weights()
             mm = {k: v.cpu() for k, v in model.state_dict().items()} #model.state_dict()
         else:
             mm = model.generate_init_weight()
@@ -240,19 +261,30 @@ if __name__ == "__main__":
         print("Done. Now go for stage 2.")
         exit(0)
 
-    rank_zero_info(f"########## Loading {config.train.load_model}... ##########")
-    if config.train.load_model.lower().endswith('.safetensors'):
-        load_dict = load_file(config.train.load_model)
-        load_dict['lm_head.weight'] = load_dict['model.embed_tokens.weight']
-    else:
-        load_dict = torch.load(config.train.load_model, map_location="cpu")
+    if config.train.train_stage >= 2:
+        rank_zero_info(f"########## Loading {config.train.load_model}... ##########")
+        if config.train.load_model.lower().endswith('.safetensors'):
+            load_dict = load_file(config.train.load_model)
+            if classname.startswith('qwen2') or config.model.tmix.startswith('qwen2'):
+                load_dict['lm_head.weight'] = load_dict['model.embed_tokens.weight']
+            load_dict['lm_head.weight'] = load_dict['model.embed_tokens.weight']
+        else:
+            load_dict = torch.load(config.train.load_model, map_location="cpu")
 
-    if config.train.load_partial == 1:
-        load_keys = load_dict.keys()
-        for k in model.state_dict():
-            if k not in load_keys:
-                load_dict[k] = model.state_dict()[k]
-    model.load_state_dict(load_dict, strict = not config.train.load_partial)
+    if config.train.train_stage == 0 or config.train.load_partial == 1:
+        if config.model.tmix.startswith("qwen2"):
+            model.apply(model._init_weights)
+            model.init_all_weights()
+        #else:
+            #mm = model.init_weights() # already done in the constructor
+
+    if config.train.train_stage >= 2 and config.train.load_model != '':
+        if config.train.load_partial == 1:
+            load_keys = load_dict.keys()
+            for k in model.state_dict():
+                if k not in load_keys:
+                    load_dict[k] = model.state_dict()[k]
+        model.load_state_dict(load_dict, strict = not config.train.load_partial)
 
     if trainer.global_rank == 0:
         for n in model.state_dict():
@@ -267,6 +299,30 @@ if __name__ == "__main__":
         trainer.strategy.config["zero_optimization"]["allgather_bucket_size"] = config.train.ds_bucket_mb * 1000 * 1000
         trainer.strategy.config["zero_optimization"]["reduce_bucket_size"] = config.train.ds_bucket_mb * 1000 * 1000
 
+    if config.model.tmix.startswith('qwen2'):
+        if config.train.grad_cp:
+            if "deepspeed" in config.train.strategy:
+                # FIXME - why is this having a weird issue where whatever it's passing as hidden_states seems to have 2 not 3 dims?
+                model._set_gradient_checkpointing(True, deepspeed.checkpointing.checkpoint)
+            else:
+                model.gradient_checkpointing_enable()
+            if teacher is not None:
+                if "deepspeed" in config.train.strategy:
+                    teacher._set_gradient_checkpointing(True, deepspeed.checkpointing.checkpoint)
+                else:
+                    teacher.gradient_checkpointing_enable()
+        if os.getenv("RWKV_TORCH_COMPILE", '0').lower() in ['1', 'true']:
+            model = torch.compile(model)
+            if teacher is not None:
+                teacher = torch.compile(teacher)
+        #elif os.getenv("RWKV_JIT_ON", '1').lower() in ['1', 'true']:
+        #    model = torch.jit.script(model)
+        #    if teacher is not None:
+        #        teacher = torch.jit.script(teacher)
+
+    with trainer.init_module(empty_init=not config.train.load_partial):
+        wrapper = LightningModelWrapper(model, config, teacher)
+       
     train_data = MyDataset(config, trainer)
     if config.train.validation_data_file != "":
         validation_data = MMapDataset(config.train.validation_data_file, config.model.ctx_len)

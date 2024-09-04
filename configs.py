@@ -4,6 +4,7 @@ import typing
 
 @dataclass(kw_only=True)
 class Model_Config:
+    classname: str = ''
     tmix: str = 'x060'
     tmix2: str = ''
     cmix: str = 'x060'
@@ -17,6 +18,10 @@ class Model_Config:
     inv_other_layer_ratio:float = 1
     preserve_last_n_layers:int = 0
     kv_cache_compression_ratio:float = 16
+
+    rms_norm_eps:float = 1e-06
+    vocab_padding_idx:int|None = None
+
 
 @dataclass(kw_only=True)
 class RoPE_Config:
@@ -38,9 +43,11 @@ class Transformer_Config(Model_Config):
     dim_ffn:int = 0
     head_size:int = 64
     head_size_divisor:int = 8
+    num_key_value_heads:int = 0
     rope:RoPE_Config|None = None
     brope:BinaryRoPE_Config|None = None
     alibi:Alibi_Config|None = None
+    attention_type:str = ''
 
 @dataclass(kw_only=True)
 class FinchC2_Config(Transformer_Config):

@@ -180,7 +180,7 @@ class Transformer(nn.Module):
             self.w_kv_cache_a = nn.Linear(args.n_embd, int(args.n_embd / args.kv_cache_compression_ratio), bias=False)
             self.w_kv_cache_b = nn.Linear(int(args.n_embd / args.kv_cache_compression_ratio) + args.n_embd, args.dim_att, bias=False)
 
-        if self.training and hasattr(config, 'train') and config.train is not None and getattr(config.train, 'load_partial', 0):
+        if self.training and hasattr(config, 'train') and config.train is not None and (getattr(config.train, 'load_partial', 0) or getattr(config.train, 'train_stage', 0) == 0):
             self.init_weights()
 
     def ckpt(self, block, *block_args):

@@ -658,6 +658,7 @@ class Qwen2RWKV6cSimple(Qwen2Attention):
             for h in range(H):
                 decay_speed[h] = -6 + 5 * (h / max(H - 1, 1)) ** (0.7 + 1.3 * ratio_0_to_1)
             self.time_decay = nn.Parameter(decay_speed)
+            #self.time_decay = nn.Parameter(torch.empty(H)).uniform_(-8, -7)
             D_DECAY_LORA = 64 if n_embd < 4096 else 128
             self.time_decay_w1 = nn.Parameter(torch.zeros(n_embd, D_DECAY_LORA))
             self.time_decay_w2 = nn.Parameter(torch.zeros(D_DECAY_LORA, H).uniform_(-0.01, 0.01))
@@ -980,6 +981,18 @@ class Qwen2PreTrainedModel(PreTrainedModel):
             module.weight.data.normal_(mean=0.0, std=std)
             if module.padding_idx is not None:
                 module.weight.data[module.padding_idx].zero_()
+
+    def init_all_weights(self):
+        for n, p in self.named_parameters():
+            requires_grad_temp = p.requires_grad
+            p.requires_grad_(False)
+            if n.endswith('.ln_x.weight'):
+                layer_scale = (1+int(n.split('.')[2])) / self.config.num_hidden_layers
+                print('.ln_x.weight layer', int(n.split('.')[2]), "scale", (layer_scale ** 0.7))
+                p *= 0.0
+                p += (layer_scale ** 0.7)
+            p.requires_grad = requires_grad_temp
+
 
 
 QWEN2_INPUTS_DOCSTRING = r"""
