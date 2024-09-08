@@ -49,6 +49,10 @@ class LightningModelWrapper(pl.LightningModule):
         self.teacher = teacher
         self.metrics = dict(loss=metrics.Loss(), acc=metrics.Accuracy())
 
+    def configure_model(self):
+        if hasattr(self.model, 'configure_model'):
+            self.model.configure_model()
+
     def forward(self, idx, last_model_state:ModelState|None = None):
         return self.model.forward(idx, last_model_state)
     
@@ -82,26 +86,28 @@ class LightningModelWrapper(pl.LightningModule):
             stage = self.config.train.teacher.attention_distillation_stage
             output_attentions = stage == 1
             output_post_attention_hidden_states = stage == 2
-            # FIXME - special code for attention matrix loss
+            # special code for attention output and/or attention matrix loss
             with torch.no_grad():
-                if self.config.model.classname.lower().startswith('qwen2'):
+                if self.config.model.classname != '':
                     teacher_results = self.teacher.forward(x, output_hidden_states=True, output_attentions=output_attentions, output_post_attention_hidden_states=output_post_attention_hidden_states)
                 else:
                     teacher_results = self.teacher.forward(x, return_dict=True, attention_mask=causal_mask, output_hidden_states=True, output_attentions=output_attentions, output_post_attention_hidden_states=output_post_attention_hidden_states)
-
-            if self.config.model.classname.lower().startswith('qwen2'):
+            if self.config.model.classname != '':
                 student_results = self.model.forward_attentions(teacher_results.hidden_states, last_model_state=last_model_state, output_attentions=output_attentions, output_post_attention_hidden_states=output_post_attention_hidden_states)
             else:
                 student_results = self.model.forward_attentions(teacher_results.hidden_states, attention_mask=causal_mask, output_attentions=output_attentions, output_post_attention_hidden_states=output_post_attention_hidden_states)
+            #for i in range(self.config.model.n_layer):
+            #    print('', i, float(teacher_results.hidden_states[i].min()), float(teacher_results.hidden_states[i].max()), float(teacher_results.attentions[i].min()), float(teacher_results.attentions[i].max()), float(student_results.attentions[i].min()), float(student_results.attentions[i].max()), )
+            #exit(0)
             if stage == 1:
-                reported_loss = training_loss = torch.linalg.matrix_norm(torch.cat(teacher_results.attentions, dim=0) - torch.cat(student_results.attentions, dim=0)).mean() / teacher_results.attentions[0].size(-1)
+                reported_loss = training_loss = torch.linalg.matrix_norm(torch.cat(teacher_results.attentions, dim=0) - torch.cat(student_results.attentions, dim=0)).mean()# / teacher_results.attentions[0].size(-1)
             else: # stage == 2:
                 reported_loss = training_loss = torch.linalg.vector_norm(torch.cat(teacher_results.post_attention_hidden_states, dim=0) - torch.cat(student_results.post_attention_hidden_states, dim=0), dim=-1).mean() * (student_results.post_attention_hidden_states[0].size(-1) ** -0.5)
             logits = torch.tensor([], device=x.device)
             preds = torch.zeros_like(y)
             return reported_loss, training_loss, logits, preds, last_model_state
 
-        if self.config.model.classname.lower().startswith('qwen2'):
+        if self.config.model.classname != '':
             results = self.model(x, last_model_state, output_hidden_states=False)
         elif self.config.model.tmix.lower().startswith('qwen2'):
             results = self.model(x, attention_mask=causal_mask, output_hidden_states=False)
@@ -136,7 +142,9 @@ class LightningModelWrapper(pl.LightningModule):
                 log_target=True,
                 reduction='batchmean'
             )
-            training_loss = distillation_loss * self.config.train.teacher.kl_weight + training_loss * self.config.train.teacher.ce_weight
+            training_loss = distillation_loss * self.config.train.teacher.kl_weight
+            if self.config.train.teacher.ce_weight > 0:
+                training_loss = training_loss + reported_loss * self.config.train.teacher.ce_weight
 
         if training_loss.isinf().any():
             raise Exception("loss was infinite")
@@ -189,10 +197,10 @@ class LightningModelWrapper(pl.LightningModule):
                     if len(self.config.train.wandb) > 0:
                         self.trainer.my_wandb.log(logdict, step=self.get_real_global_step(), commit=True)
 
-        if logits.size(0) > 0:
-            return L2Wrap.apply(training_loss, logits)
-        else:
-            return training_loss
+        #if logits.size(0) > 0:
+        #    return L2Wrap.apply(training_loss, logits)
+        #else:
+        return training_loss
 
     def on_validation_epoch_start(self):
         if self.trainer.is_global_zero:

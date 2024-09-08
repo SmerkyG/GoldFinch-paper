@@ -16,6 +16,8 @@ torch.backends.cudnn.allow_tf32 = True
 torch.backends.cuda.matmul.allow_tf32 = True
 from torch.nn import functional as F
 
+from pydoc import locate
+
 from configs import parse_cmdline_configs, TrainerCLI_Config, Model_Config, Runtime_Config, Config
 
 os.environ["RWKV_JIT_ON"] = '1'
@@ -55,12 +57,30 @@ model_path = config.path
 
 # Setup the model
 from src.model import Transformer
+from safetensors.torch import load_file
 
 print(f'Loading model - {model_path}')
-state_dict = torch.load(model_path, mmap=True)
+classname = config.model.classname
+if config.path.lower().endswith('.safetensors'):
+    load_dict = load_file(config.path)
+else:
+    load_dict = torch.load(model_path, mmap=True)
+if classname.startswith('qwen2') or config.model.tmix.startswith('qwen2'):
+    load_dict['lm_head.weight'] = load_dict['model.embed_tokens.weight']
+    
 with torch.device('meta'):
-    model = Transformer(config)
-model.load_state_dict(state_dict, assign=True)
+    if classname != '':
+        model_classpath = f'models.{classname}.Model_{classname}'
+        model_factory = locate(model_classpath)
+        if model_factory is None:
+            print(f"Unsupported model type: {model_classpath}")
+            exit(0)
+        model = model_factory(config)
+    #elif config.model.tmix.startswith('qwen2'):
+    #    model = Qwen2ForCausalLM(Qwen2Config(rwkv='rwkv' in config.model.tmix, **qwen_cfg), config)
+    else:
+        model = Transformer(config)
+model.load_state_dict(load_dict, assign=True)
 
 match config.precision:
     case 32:
@@ -87,6 +107,9 @@ eval_tasks = config.tasks.split(',')
 
 RWKV_PAD = pipeline.tokenizer.encode('\n') # we will use '\n' as PAD
 # RWKV_PAD = [0] # you can try using [0] as pad
+
+RWKV_PAD = -1 # means do not pad
+
 print('RWKV_PAD', RWKV_PAD)
 
 ########################################################################################################
@@ -109,9 +132,9 @@ class EvalHarnessAdapter(TemplateLM):
     # bugfix for lm_eval 0.4.2
     AUTO_MODEL_CLASS = transformers.AutoModelForCausalLM
 
-    def __init__(self, batch_size_per_gpu):
+    def __init__(self, batch_size_per_gpu, tokenizer):
         super().__init__()
-        self.tokenizer = TokenizerWrapper(pipeline.tokenizer)
+        self.tokenizer = tokenizer
         self.batch_size_per_gpu = batch_size_per_gpu
 
     def loglikelihood_rolling(self, requests, disable_tqdm: bool = False):
@@ -203,7 +226,10 @@ class EvalHarnessAdapter(TemplateLM):
             batch_info = []
             maxlen = 0
             for i in range(nb, ne):
-                q = RWKV_PAD + requests[i][1]
+                if RWKV_PAD >= 0:
+                    q = RWKV_PAD + requests[i][1]
+                else:
+                    q = requests[i][1]
                 src = q + requests[i][2]
                 input = torch.tensor(src, dtype=torch.long, device=device, requires_grad=False)
                 batch.append( input )
@@ -215,9 +241,19 @@ class EvalHarnessAdapter(TemplateLM):
                 batch[i] = F.pad(batch[i], (0, maxlen - batch[i].size(0)))
             batch = torch.stack(batch, dim=0)
 
-            outputs, _ = model.forward(batch, None)
+            results = model.forward(batch, None)
+            if isinstance(results, tuple):
+                logits = results[0]
+                #next_model_state = results[1]
+            elif isinstance(results, torch.Tensor):
+                logits = results
+                #next_model_state = last_model_state
+            else:
+                logits = results.logits
+                #next_model_state = last_model_state
+                
 
-            batched_logits = F.log_softmax(outputs, dim=-1)
+            batched_logits = F.log_softmax(logits, dim=-1)
             # Check if per-token argmax is exactly equal to continuation
             batched_greedy_toks = batched_logits.argmax(dim=-1)
             
@@ -247,7 +283,11 @@ class EvalHarnessAdapter(TemplateLM):
 if config.seed is None:
     config.seed = 1234 
 
-adapter = EvalHarnessAdapter(batch_size_per_gpu=config.bsz)
+# tokenizer = TokenizerWrapper(pipeline.tokenizer) # RWKV tokenizer
+from transformers import Qwen2Tokenizer, Qwen2TokenizerFast
+tokenizer:transformers.PreTrainedTokenizer = Qwen2Tokenizer.from_pretrained('Qwen/Qwen-tokenizer')
+
+adapter = EvalHarnessAdapter(batch_size_per_gpu=config.bsz, tokenizer=tokenizer)
 with torch.no_grad():
     with torch.amp.autocast(device_type='cuda', dtype=dtype):
 	    results = evaluator.simple_evaluate(

@@ -20,6 +20,8 @@ import torch.utils.checkpoint
 if importlib.util.find_spec('deepspeed'):
     import deepspeed
 
+from src.logger import print0 as print
+
 from fla.ops.simple_gla.chunk import chunk_simple_gla, SimpleGLAFunction
 
 def fla_chunk_simple_gla(
@@ -188,13 +190,23 @@ class TMix_qwen2(nn.Module):
 
         if output_attentions:
             attn_weights = (q * (self.head_dim ** -0.5)) @ k.mT
-            causal_mask = torch.full([L, L], fill_value=-torch.inf, device=attn_weights.device, dtype=attn_weights.dtype).triu(1)
-            attn_weights = attn_weights + causal_mask
 
-            # # upcast attention to fp32
-            attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(q.dtype)
+            #y = nn.functional.softmax(attn_weights + causal_mask, dim=-1, dtype=torch.float32).to(q.dtype) @ v
             #attn_weights = nn.functional.dropout(attn_weights, p=self.attention_dropout, training=self.training)
-            y = torch.matmul(attn_weights, v)
+            #y = torch.matmul(attn_weights, v)
+
+            # NOTE - we are outputting the non-softmaxed attention weights, just with exp() maxed to 1.0 since we're comparing against pre-normalized output of linear attention
+            # upcast attention to fp32
+            causal_mask = torch.full([L, L], fill_value=-torch.inf, device=attn_weights.device, dtype=attn_weights.dtype).triu(1)
+
+            attn_weights = nn.functional.softmax(attn_weights + causal_mask, dim=-1, dtype=torch.float32).to(q.dtype)
+
+            #attn_weights = attn_weights.tril()
+            #attn_weights = (attn_weights - attn_weights.max() + causal_mask).exp()
+            #attn_weights = (attn_weights - torch.max(attn_weights, dim=-1, keepdim=True).values + causal_mask).exp()
+
+
+            y = nn.functional.scaled_dot_product_attention(q, k, v, dropout_p=0.0, is_causal=is_causal)
         else:
             attn_weights = torch.empty(0, device=x.device)
             y = nn.functional.scaled_dot_product_attention(q, k, v, dropout_p=0.0, is_causal=is_causal)
@@ -306,7 +318,7 @@ class TMix_qwen2rwkv(TMix_qwen2):
         value_states = repeat_kv(value_states, self.num_key_value_groups)
         #dropout_rate = 0.0 if not self.training else self.attention_dropout
 
-        decay_states_log = -decay_states.exp()
+        decay_states_log = -decay_states.float().exp()
         decay_states_log = decay_states_log.clamp(-5) # FIXME - is this necessary?
         key_states = (key_states * (1 - decay_states_log.exp())).to(key_states.dtype)
 
@@ -343,23 +355,23 @@ class TMix_qwen2rwkv(TMix_qwen2):
 
         # decay_states_log.view is to match fla_chunk_simple_gla's requirements
         #print("layer", self.layer_id, "pre ", bool(query_states.isnan().any()), bool(key_states.isnan().any()), bool(value_states.isnan().any()), bool(decay_states_log.isnan().any()))
-        attn_output = fla_chunk_simple_gla(query_states, key_states, value_states, decay_states_log.view(bsz, self.num_heads, q_len))[0]
         #o = chunk_simple_gla(q.contiguous(), k.contiguous(), v.contiguous(), g.contiguous(), scale)
 
         #print("layer", self.layer_id, "post", bool(query_states.isnan().any()), bool(key_states.isnan().any()), bool(value_states.isnan().any()), bool(decay_states_log.isnan().any()))
 
-        attn_output = attn_output.transpose(1, 2).contiguous()
-        attn_output = attn_output.view(bsz, q_len, self.hidden_size)
-
-        attn_output = self.ln_x(attn_output)
-        attn_output = self.o_proj(attn_output)
-
         if not output_attentions:
             attn_weights = torch.empty(0, device=x.device)
+
+            attn_output = fla_chunk_simple_gla(query_states, key_states, value_states, decay_states_log.view(bsz, self.num_heads, q_len))[0]
+            attn_output = attn_output.transpose(1, 2).contiguous()
+            attn_output = attn_output.view(bsz, q_len, self.hidden_size)
+            attn_output = self.ln_x(attn_output)
+            attn_output = self.o_proj(attn_output)
         else:
-            attn_weights = query_states @ key_states.mT
-            attn_weights = attn_weights * self.segsum(decay_states_log)
+            attn_weights = (query_states * (key_states.size(-1) ** -0.5)) @ key_states.mT
+            attn_weights = attn_weights.float() * self.segsum(decay_states_log.float()) # NOTE - without the explicit cast to float ddp mismatched deepspeed here
             attn_weights = attn_weights.to(query_states.dtype)
+            attn_output = torch.empty(0, device=x.device)
     
         return attn_output, TimeMixState(last_state.wkv_state, last_state.shift_state), attn_weights #, past_key_value
     
@@ -406,10 +418,10 @@ class Qwen2DecoderLayer(nn.Module):
         cmix = CMix_qwen2(args, layer_id)
 
         self.default_time_mix_state_factory = tmix.get_default_state_factory() if hasattr(tmix, 'get_default_state_factory') else lambda x, c, r: TimeMixState()
-        self.self_attn = TJIT(tmix)
+        self.self_attn = tmix
         
         self.default_channel_mix_state_factory = cmix.get_default_state_factory() if hasattr(cmix, 'get_default_state_factory') else lambda x, c, r: ChannelMixState()
-        self.mlp = TJIT(cmix)
+        self.mlp = cmix
 
     def forward(self, x:Tensor, last_model_state:ModelState, shared:Shared, output_attentions:bool, output_post_attention_hidden_states:bool):
         s = last_model_state
@@ -425,10 +437,11 @@ class Qwen2DecoderLayer(nn.Module):
 
 def ckpt(block:Qwen2DecoderLayer, *block_args):
     if block.training and block.config.train.grad_cp == 1:
-        if "deepspeed" in block.config.train.strategy:
-            results = deepspeed.checkpointing.checkpoint(block, *block_args)
-        else:
-            results = torch.utils.checkpoint.checkpoint(block, *block_args, use_reentrant=False)
+        #if "deepspeed" in block.config.train.strategy:
+        #    results = deepspeed.checkpointing.checkpoint(block, *block_args)
+        #else:
+        # NOTE - both deepspeed.checkpointing.checkpoint and use_reentrant=True failed miserably (bad loss) when used in conjunction with requires_grad=False params and grad_cp with deepspeed
+        results = torch.utils.checkpoint.checkpoint(block, *block_args, use_reentrant=False)
     else:
         results = block(*block_args)
     return results
@@ -532,15 +545,27 @@ class Model_qwen2(nn.Module): # Qwen2CausalLM
         if args.dim_ffn <= 0:
             args.dim_ffn = int((args.n_embd * 3.5) // 32 * 32)  # default = 3.5x emb size
 
-        self.model = Qwen2Decoder(config)
+        self.model = None
 
-        self.lm_head = nn.Linear(args.n_embd, args.vocab_size, bias=False)
+        self.configure_model()
+
+    def configure_model(self):
+        if self.model is not None: 
+            return
+
+        self.model = Qwen2Decoder(self.config)
+
+        self.lm_head = nn.Linear(self.config.model.n_embd, self.config.model.vocab_size, bias=False)
 
     def forward_attentions(self, all_hidden_states:Tuple[torch.Tensor], last_model_state:ModelState|None = None, output_attentions=True, output_post_attention_hidden_states=True):
+        #print("student q min, max", float(self.model.layers[0].self_attn.q_proj.weight.min()), float(self.model.layers[0].self_attn.q_proj.weight.max()))
         return self.model.forward_attentions(all_hidden_states, last_model_state=last_model_state, output_attentions=output_attentions, output_post_attention_hidden_states=output_post_attention_hidden_states)
 
     def forward(self, token_ids:Tensor|list, last_model_state:ModelState|None = None, output_hidden_states:bool=False, output_attentions:bool=False, output_post_attention_hidden_states:bool=False):
-        return self.model(token_ids, last_model_state=last_model_state, output_hidden_states=output_hidden_states, output_attentions=output_attentions, output_post_attention_hidden_states=output_post_attention_hidden_states)
+        #print("teacher q min, max", float(self.model.layers[0].self_attn.q_proj.weight.min()), float(self.model.layers[0].self_attn.q_proj.weight.max()))
+        results = self.model(token_ids, last_model_state=last_model_state, output_hidden_states=output_hidden_states, output_attentions=output_attentions, output_post_attention_hidden_states=output_post_attention_hidden_states)
+        results.logits = self.lm_head(results.logits)
+        return results
         # x, s, hidden_states_outputs, attention_outputs, post_attention_hidden_states_outputs = self.model(token_ids)
         # return self.lm_head(x), s, hidden_states_outputs, attention_outputs, post_attention_hidden_states_outputs
     
@@ -548,6 +573,36 @@ class Model_qwen2(nn.Module): # Qwen2CausalLM
         # separates groups for weight decay and non-weight decay
 
         train_config = self.config.train
+
+        if train_config.teacher is not None and train_config.teacher.attention_distillation_stage <= 2:
+            self.model.embed_tokens.requires_grad_(False)
+            for decoder_layer in self.model.layers:
+                decoder_layer.post_attention_layernorm.requires_grad_(False)
+                for p in decoder_layer.mlp.parameters():
+                    p.requires_grad_(False)
+                if train_config.teacher.attention_distillation_stage <= 1:
+                    decoder_layer.self_attn.time_maa_v.requires_grad_(False)
+                    decoder_layer.self_attn.v_proj.weight.requires_grad_(False)
+                    decoder_layer.self_attn.v_proj.bias.requires_grad_(False)
+                    decoder_layer.self_attn.o_proj.weight.requires_grad_(False)
+                    decoder_layer.self_attn.ln_x.weight.requires_grad_(False)
+                    decoder_layer.self_attn.ln_x.bias.requires_grad_(False)
+            self.model.norm.requires_grad_(False)
+            self.lm_head.requires_grad_(False)
+
+        # FIXME - remove these for full training
+        for decoder_layer in self.model.layers:
+            decoder_layer.post_attention_layernorm.requires_grad_(False)
+            for p in decoder_layer.mlp.parameters():
+                decoder_layer.mlp.requires_grad_(False)
+        self.model.embed_tokens.requires_grad_(False)
+        #self.model.norm.requires_grad_(False)
+        self.lm_head.requires_grad_(False)
+
+        # JIT at last minute
+        for decoder_layer in self.model.layers:
+            decoder_layer.self_attn = TJIT(decoder_layer.self_attn)
+            decoder_layer.mlp = TJIT(decoder_layer.mlp)
 
         lr_decay = set()
         lr_1x = set()
@@ -561,8 +616,8 @@ class Model_qwen2(nn.Module): # Qwen2CausalLM
 
         param_dict = {n: p for n, p in self.named_parameters()}
         param_check = list(lr_decay) + list(lr_1x)
-        if not train_config.load_partial:
-            assert sorted(param_dict) == sorted(param_check)
+        #if not train_config.load_partial and (train_config.teacher is None or train_config.teacher.attention_distillation_stage ==3):
+        #    assert sorted(param_dict) == sorted(param_check)
 
         lr_decay = sorted(list(lr_decay))
         lr_1x = sorted(list(lr_1x))
@@ -578,4 +633,25 @@ class Model_qwen2(nn.Module): # Qwen2CausalLM
             optim_groups += [{"params": [param_dict[n] for n in lr_decay], "weight_decay": train_config.weight_decay, "my_lr_scale": 1.0, 'name':'lr_decay'}]
 
         return optim_groups    
-    
+
+    def _init_weights(self, module):
+        std = 0.02 #self.config.initializer_range
+        if isinstance(module, nn.Linear):
+            module.weight.data.normal_(mean=0.0, std=std)
+            if module.bias is not None:
+                module.bias.data.zero_()
+        elif isinstance(module, nn.Embedding):
+            module.weight.data.normal_(mean=0.0, std=std)
+            if module.padding_idx is not None:
+                module.weight.data[module.padding_idx].zero_()
+
+    def init_all_weights(self):
+        for n, p in self.named_parameters():
+            requires_grad_temp = p.requires_grad
+            p.requires_grad_(False)
+            if n.endswith('.ln_x.weight'):
+                layer_scale = (1+int(n.split('.')[2])) / self.config.model.n_layer
+                print('.ln_x.weight layer', int(n.split('.')[2]), "scale", (layer_scale ** 0.7))
+                p *= 0.0
+                p += (layer_scale ** 0.7)
+            p.requires_grad = requires_grad_temp

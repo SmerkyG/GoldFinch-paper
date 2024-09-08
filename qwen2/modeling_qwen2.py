@@ -741,7 +741,7 @@ class Qwen2RWKV6cSimple(Qwen2Attention):
         value_states = repeat_kv(value_states, self.num_key_value_groups)
         dropout_rate = 0.0 if not self.training else self.attention_dropout
 
-        decay_states_log = -decay_states.exp()
+        decay_states_log = -decay_states.float().exp()
         decay_states_log = decay_states_log.clamp(-5) # FIXME - is this necessary?
         key_states = (key_states * (1 - decay_states_log.exp())).to(key_states.dtype)
 
@@ -773,24 +773,29 @@ class Qwen2RWKV6cSimple(Qwen2Attention):
             value_states = value_states.to(target_dtype)
 
         # decay_states_log.view is to match fla_chunk_simple_gla's requirements
-        attn_output = fla_chunk_simple_gla(query_states, key_states, value_states, decay_states_log.view(bsz, self.num_heads, q_len))[0]
+        #print("layer", self.layer_idx, "pre ", bool(query_states.isnan().any()), bool(key_states.isnan().any()), bool(value_states.isnan().any()), bool(decay_states_log.isnan().any()))
+        #o = chunk_simple_gla(q.contiguous(), k.contiguous(), v.contiguous(), g.contiguous(), scale)
 
-        attn_output = attn_output.transpose(1, 2).contiguous()
-        attn_output = attn_output.view(bsz, q_len, self.hidden_size)
-
-        attn_output = self.ln_x(attn_output)
-        attn_output = self.o_proj(attn_output)
+        #print("layer", self.layer_idx, "post", bool(query_states.isnan().any()), bool(key_states.isnan().any()), bool(value_states.isnan().any()), bool(decay_states_log.isnan().any()))
 
         if not output_attentions:
             attn_weights = None
+
+            attn_output = fla_chunk_simple_gla(query_states, key_states, value_states, decay_states_log.view(bsz, self.num_heads, q_len))[0]
+            attn_output = attn_output.transpose(1, 2).contiguous()
+            attn_output = attn_output.view(bsz, q_len, self.hidden_size)
+            attn_output = self.ln_x(attn_output)
+            attn_output = self.o_proj(attn_output)
         else:
-            attn_weights = query_states @ key_states.mT
-            attn_weights = attn_weights * self.segsum(decay_states_log)
+            attn_weights = (query_states * (query_states.size(-1) ** -0.5)) @ key_states.mT
+            attn_weights = attn_weights * self.segsum(decay_states_log.float()) # NOTE - without the explicit cast to float ddp mismatched deepspeed here
             # FIXME - the attention weights need to pass through normalization somehow, since they have no denominator...
             # but we can't divide by the denominator (sum of each row) here, because it could be negative or have negative components!
             #eps = 1e-8
             #attn_weights = attn_weights / (attn_weights.sum(-1, keepdim=True) + eps)
             attn_weights = attn_weights.to(query_states.dtype)
+
+            attn_output = None
 
         return attn_output, attn_weights, past_key_value
 

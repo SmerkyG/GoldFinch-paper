@@ -1,30 +1,44 @@
 model:
     __type__: configs.Transformer_Config
-    tmix: qwen2
+    #tmix: qwen2
+    classname: qwen2
     ctx_len: 512 # 4096
     vocab_size: 151936
+    vocab_padding_idx: 151646 
+    num_key_value_heads: 2
+    n_embd: 896
+    dim_ffn: 4864
+    n_layer: 24
+    rope:
+        __type__: configs.RoPE_Config
+        base: 1000000.0
 
 train:
+  #wandb: qwen2rwkv
+
   proj_name: qwen2-0B5
-  proj_suffix: 3
+  proj_suffix: 1
   train_stage: 3
   load_model: /home/recursal/LinearAttentionArena/out/qwen2-0B5.safetensors
   load_partial: 0
 
   data_type: "binidx" 
   data_file: "data/minipile_qwen2" 
-  my_exit_tokens: 10000000 # 1491785955
+  my_exit_tokens: 1491785955
   magic_prime: 2913641 # 364193
 
   lr_init: 1e-5
   lr_final: 1e-5
-  warmup_steps: 10 
+  warmup_steps: 500 
   beta1: 0.9 
-  beta2: 0.99 
+  beta2: 0.95 
   adam_eps: 1e-8 
-  weight_decay: 0.001 
+  weight_decay: 0.1 
 
   devices: 1
   num_nodes: 1
-  micro_bsz: 4
+  micro_bsz: 8
   accumulate_grad_batches: 1
+  strategy: deepspeed_stage_2
+  grad_cp: 1
+  ds_bucket_mb: 2 # set to 2 for consumer GPUs, set to 200 for A100 / H100 (affects speed & vram usage)

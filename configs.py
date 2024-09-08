@@ -168,16 +168,25 @@ def merge_config(dst:dict, src:dict):
     return dst
 
 import ast
+from ast import Constant, UnaryOp, USub
 
 def literal_eval(s:str):
+    def _convert_num(node):
+        if not isinstance(node, Constant) or type(node.value) not in (int, float, complex):
+            raise ValueError()
+        return node.value
+
     # if we can convert to a constant, great
     # if not, treat it as a string
     try:
-        node = ast.parse(s.lstrip(" \t"), mode='eval')        
+        node = ast.parse(s.lstrip(" \t"), mode='eval')
         if isinstance(node, ast.Expression):
             node = node.body
-        if isinstance(node, ast.Constant):
-            return node.value
+        multiplier = 1
+        if isinstance(node, UnaryOp) and isinstance(node.op, USub):
+            multiplier = -1
+            node = node.operand
+        return multiplier * _convert_num(node)
     except:
         pass
     s = s.encode('latin-1','backslashreplace').decode('unicode_escape')

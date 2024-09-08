@@ -58,7 +58,7 @@ if __name__ == "__main__":
     if not os.path.exists(config.runtime.proj_path):
         os.makedirs(config.runtime.proj_path)
 
-    assert config.train.train_stage >= 0
+    assert config.train.train_stage >= -1
 
     EPOCH_SAMPLE_SIZE = 40320
     runtime_config.epoch_count = config.train.magic_prime // EPOCH_SAMPLE_SIZE
@@ -228,6 +228,7 @@ if __name__ == "__main__":
                     load_dict['lm_head.weight'] = load_dict['model.embed_tokens.weight']
                 else:
                     teacher = Transformer(teacher_config)
+            teacher = teacher.to(torch.bfloat16) # NOTE - doing this here because otherwise it doesn't get done when not using deepspeed
             teacher.load_state_dict(load_dict)
             teacher.eval()
             teacher.requires_grad_(False)
@@ -249,7 +250,9 @@ if __name__ == "__main__":
     if config.train.train_stage == 1:  # should we build the initial weights?
         init_weight_name = f"{config.runtime.proj_path}/rwkv-init.pth"
         if classname != '':
-            pass # FIXME
+            model.apply(model._init_weights)
+            model.init_all_weights()
+            mm = {k: v.cpu() for k, v in model.state_dict().items()} #model.state_dict()
         elif config.model.tmix.startswith("qwen2"):
             model.apply(model._init_weights)
             model.init_all_weights()
@@ -261,30 +264,40 @@ if __name__ == "__main__":
         print("Done. Now go for stage 2.")
         exit(0)
 
-    if config.train.train_stage >= 2:
+    if config.train.load_model != '':#config.train.train_stage >= 2:
         rank_zero_info(f"########## Loading {config.train.load_model}... ##########")
         if config.train.load_model.lower().endswith('.safetensors'):
             load_dict = load_file(config.train.load_model)
-            if classname.startswith('qwen2') or config.model.tmix.startswith('qwen2'):
-                load_dict['lm_head.weight'] = load_dict['model.embed_tokens.weight']
-            load_dict['lm_head.weight'] = load_dict['model.embed_tokens.weight']
         else:
             load_dict = torch.load(config.train.load_model, map_location="cpu")
+        if classname.startswith('qwen2') or config.model.tmix.startswith('qwen2'):
+            load_dict['lm_head.weight'] = load_dict['model.embed_tokens.weight']
 
     if config.train.train_stage == 0 or config.train.load_partial == 1:
-        if config.model.tmix.startswith("qwen2"):
+        if classname != '':
+            model.apply(model._init_weights)
+            model.init_all_weights()
+        elif config.model.tmix.startswith("qwen2"):
             model.apply(model._init_weights)
             model.init_all_weights()
         #else:
             #mm = model.init_weights() # already done in the constructor
 
-    if config.train.train_stage >= 2 and config.train.load_model != '':
+    if config.train.load_model != '':
         if config.train.load_partial == 1:
             load_keys = load_dict.keys()
             for k in model.state_dict():
                 if k not in load_keys:
                     load_dict[k] = model.state_dict()[k]
         model.load_state_dict(load_dict, strict = not config.train.load_partial)
+
+    if config.train.train_stage == -1:
+        init_weight_name = f"{config.runtime.proj_path}/rwkv-init.pth"
+        mm = {k: v.cpu() for k, v in model.state_dict().items()} #model.state_dict()
+        print(f"Save to {init_weight_name}...")
+        torch.save(mm, init_weight_name)
+        print("Done. Now go for stage 2.")
+        exit(0)
 
     if trainer.global_rank == 0:
         for n in model.state_dict():
@@ -299,7 +312,9 @@ if __name__ == "__main__":
         trainer.strategy.config["zero_optimization"]["allgather_bucket_size"] = config.train.ds_bucket_mb * 1000 * 1000
         trainer.strategy.config["zero_optimization"]["reduce_bucket_size"] = config.train.ds_bucket_mb * 1000 * 1000
 
-    if config.model.tmix.startswith('qwen2'):
+    if classname != '':
+        pass
+    elif config.model.tmix.startswith('qwen2'):
         if config.train.grad_cp:
             if "deepspeed" in config.train.strategy:
                 model._gradient_checkpointing_func = deepspeed.checkpointing.checkpoint
