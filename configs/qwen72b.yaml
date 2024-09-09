@@ -1,6 +1,6 @@
 model:
     __type__: configs.Transformer_Config
-    #tmix: qwen2rwkv
+    tmix: qwen2
     classname: qwen2
     attention_type: rwkv
     ctx_len: 512 # 4096
