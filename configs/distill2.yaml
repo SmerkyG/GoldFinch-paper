@@ -1,7 +1,6 @@
 train:
   proj_suffix: 2
   train_stage: 3
-  load_model: out/qwen2-0B5-1/rwkv-final.pth
   load_partial: 0
 
   data_type: "binidx" 

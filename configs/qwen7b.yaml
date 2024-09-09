@@ -17,7 +17,7 @@ model:
 
 train:
   teacher:
-    path: out/qwen2-0B5.safetensors
+    path: out/qwen2-7B.safetensors
     model:
       __type__: configs.Transformer_Config
       #tmix: qwen2
