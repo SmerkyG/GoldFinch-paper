@@ -1,0 +1,31 @@
+train:
+  proj_suffix: 1
+  train_stage: 3
+  load_model: out/qwen2-0B5.safetensors
+  load_partial: 1
+
+  data_type: "binidx" 
+  data_file: "data/minipile_qwen2" 
+  my_exit_tokens: 40000000 # 1491785955
+  magic_prime: 2913641 # 364193
+
+  lr_init: 1e-3
+  lr_final: 1e-4
+  warmup_steps: 50
+  beta1: 0.9 
+  beta2: 0.95 
+  adam_eps: 1e-8 
+  weight_decay: 0.1 
+
+  devices: 8
+  num_nodes: 1
+  micro_bsz: 8
+  accumulate_grad_batches: 1 # total bsz 32
+  #strategy: ddp_find_unused_parameters_true
+  #strategy: fsdp 
+  strategy: deepspeed_stage_1
+  grad_cp: 0
+  ds_bucket_mb: 200 # set to 2 for consumer GPUs, set to 200 for A100 / H100 (affects speed & vram usage)
+  
+  teacher:
+    attention_distillation_stage: 1

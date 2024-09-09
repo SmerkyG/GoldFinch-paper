@@ -1,0 +1,29 @@
+train:
+  proj_suffix: 2
+  train_stage: 3
+  load_model: out/qwen2-0B5-1/rwkv-final.pth
+  load_partial: 0
+
+  data_type: "binidx" 
+  data_file: "data/minipile_qwen2" 
+  my_exit_tokens: 40000000 # 1491785955
+  magic_prime: 2913641 # 364193
+
+  lr_init: 3e-4
+  lr_final: 1e-8
+  warmup_steps: 500 
+  beta1: 0.9 
+  beta2: 0.95
+  adam_eps: 1e-8 
+  weight_decay: 0.1 
+
+  devices: 8
+  num_nodes: 1
+  micro_bsz: 8
+  accumulate_grad_batches: 1
+  strategy: deepspeed_stage_1
+  grad_cp: 0
+  ds_bucket_mb: 200 # set to 2 for consumer GPUs, set to 200 for A100 / H100 (affects speed & vram usage)
+    
+  teacher:
+    attention_distillation_stage: 1
