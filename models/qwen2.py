@@ -344,6 +344,8 @@ class TMix_qwen2rwkv(TMix_qwen2):
 
         #k = repeat_kv(k, self.num_key_value_groups)
         
+        q = rms_norm(q)
+        k = rms_norm(k)
 
         q = q.transpose(1,2).view(B, T, -1, K)
         k = k.transpose(1,2).view(B, T, -1, K)
@@ -378,8 +380,8 @@ class TMix_qwen2rwkv(TMix_qwen2):
         #k = torch.relu(k)
         #q = torch.softmax(q, dim=-1)
         #k = torch.softmax(k, dim=-1)
-        #q = rms_norm(q)
-        #k = rms_norm(k)
+        q = (q*0.5).exp()
+        k = (k*0.5).exp()
         #qmax = q.max()
         #kmax = k.max()
         #print(qmax, kmax)
@@ -390,8 +392,8 @@ class TMix_qwen2rwkv(TMix_qwen2):
         #k = torch.cat([torch.where(k>0,k.exp(),0), torch.where(k<0,(-k).exp(),0)], dim=-1)
         #q = torch.cat([torch.where(q>0,q.exp(),0), torch.where(q<0,(-q).exp(),0), torch.where(q>0,(-q).exp(),0), torch.where(q<0,q.exp(),0)], dim=-1)
         #k = torch.cat([torch.where(k>0,k.exp(),0), torch.where(k<0,(-k).exp(),0), torch.where(k<0,k.exp(),0), torch.where(k>0,(-k).exp(),0)], dim=-1)
-        q = torch.cat([torch.softmax(q, dim=-1), torch.softmax(-q, dim=-1)], dim=-1)
-        k = torch.cat([torch.softmax(k, dim=-1), torch.softmax(-k, dim=-1)], dim=-1)
+        #q = torch.cat([torch.softmax(q, dim=-1), torch.softmax(-q, dim=-1)], dim=-1)
+        #k = torch.cat([torch.softmax(k, dim=-1), torch.softmax(-k, dim=-1)], dim=-1)
         #q = torch.cat([torch.where(q>0,torch.softmax(q, dim=-1),0), torch.where(q<0,torch.softmax(-q, dim=-1),0)], dim=-1)
         #k = torch.cat([torch.where(k>0,torch.softmax(k, dim=-1),0), torch.where(k<0,torch.softmax(-k, dim=-1),0)], dim=-1)
         #q = torch.cat([q.exp().to(v.dtype), (-q).exp().to(v.dtype)], dim=-1)
