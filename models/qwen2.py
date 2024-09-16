@@ -344,8 +344,8 @@ class TMix_qwen2rwkv(TMix_qwen2):
 
         #k = repeat_kv(k, self.num_key_value_groups)
         
-        q = rms_norm(q)
-        k = rms_norm(k)
+        #q = rms_norm(q)
+        #k = rms_norm(k)
 
         q = q.transpose(1,2).view(B, T, -1, K)
         k = k.transpose(1,2).view(B, T, -1, K)
@@ -380,8 +380,12 @@ class TMix_qwen2rwkv(TMix_qwen2):
         #k = torch.relu(k)
         #q = torch.softmax(q, dim=-1)
         #k = torch.softmax(k, dim=-1)
-        q = (q*0.5).exp()
-        k = (k*0.5).exp()
+        q = F.tanh(q)
+        k = F.tanh(k)
+        q = torch.cat([(q*0.5).exp(), (q*-0.5).exp()], dim=-1)
+        k = torch.cat([(k*0.5).exp(), (k*-0.5).exp()], dim=-1)
+        #q = torch.cat([torch.where(q>0,(q*0.5).exp(),0), torch.where(q<0,(q*-0.5).exp(),0)], dim=-1)
+        #k = torch.cat([torch.where(k>0,(k*0.5).exp(),0), torch.where(k<0,(k*-0.5).exp(),0)], dim=-1)
         #qmax = q.max()
         #kmax = k.max()
         #print(qmax, kmax)
