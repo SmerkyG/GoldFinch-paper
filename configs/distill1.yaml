@@ -18,7 +18,7 @@ train:
 
   devices: 8
   num_nodes: 1
-  micro_bsz: 8
+  micro_bsz: 4
   accumulate_grad_batches: 1 # total bsz 32
   #strategy: ddp_find_unused_parameters_true
   #strategy: fsdp 
