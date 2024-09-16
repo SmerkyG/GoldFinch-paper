@@ -40,6 +40,10 @@ def fla_chunk_simple_gla(
     o, final_state = SimpleGLAFunction.apply(q, k, v, g, scale, initial_state, output_final_state, checkpoint_level)
     return o, final_state
 
+def rms_norm(x, eps:float = 1e-8):
+    #return x * (x.square().mean(dim=-1, keepdim=True) + eps).rsqrt()
+    rms_norm = (x.size(-1) ** -0.5) * x.norm(2, dim=-1, keepdim=True)
+    return x / (rms_norm + eps)
 
 # Copied from transformers.models.llama.modeling_llama.LlamaRMSNorm with Llama->Qwen2
 class Qwen2RMSNorm(nn.Module):
@@ -99,6 +103,17 @@ def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
         return hidden_states
     hidden_states = hidden_states[:, :, None, :, :].expand(batch, num_key_value_heads, n_rep, slen, head_dim)
     return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
+
+def repeat_k(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
+    """
+    This is the equivalent of torch.repeat_interleave(x, dim=1, repeats=n_rep). The hidden states go from (batch,
+    num_key_value_heads, seqlen, head_dim) to (batch, num_attention_heads, seqlen, head_dim)
+    """
+    B, T, KVH, K = hidden_states.shape
+    if n_rep == 1:
+        return hidden_states
+    hidden_states = hidden_states[:, :, :, None, :].expand(B, T, KVH, n_rep, K)
+    return hidden_states.reshape(B, T, KVH * n_rep, K)
 
 def get_tmix_default_state(x:Tensor, config:Transformer_Config, requires_grad:bool):
     B, T, C = x.size()
@@ -176,6 +191,9 @@ class TMix_qwen2(nn.Module):
         k = k.view(B,L,KVH,-1).transpose(1,2)
         v = v.view(B,L,KVH,-1).transpose(1,2)
 
+        q = q.float()
+        k = k.float()
+
         #q, k = apply_rotary_embedding(q, k, shared.angles)
         #kv_seq_len, position_ids = L, torch.arange(L, dtype=torch.int, device=v.device).view(1, L).expand(B, L)
         #cos, sin = self.rotary_emb(v, seq_len=kv_seq_len)
@@ -198,8 +216,8 @@ class TMix_qwen2(nn.Module):
             # NOTE - we are outputting the non-softmaxed attention weights, just with exp() maxed to 1.0 since we're comparing against pre-normalized output of linear attention
             # upcast attention to fp32
             causal_mask = torch.full([L, L], fill_value=-torch.inf, device=attn_weights.device, dtype=attn_weights.dtype).triu(1)
-
-            attn_weights = nn.functional.softmax(attn_weights + causal_mask, dim=-1, dtype=torch.float32).to(q.dtype)
+            attn_weights = nn.functional.softmax(attn_weights + causal_mask, dim=-1, dtype=torch.float32).to(v.dtype)
+            #attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(v.dtype)
 
             #attn_weights = attn_weights.tril()
             #attn_weights = (attn_weights - attn_weights.max() + causal_mask).exp()
@@ -241,28 +259,31 @@ class TMix_qwen2rwkv(TMix_qwen2):
             # self.time_maa_v = nn.Parameter(1.0 - (torch.pow(ddd, ratio_1_to_almost0) + 0.3 * ratio_0_to_1))
             # self.time_maa_w = nn.Parameter(1.0 - torch.pow(ddd, ratio_1_to_almost0))
 
-            ddd = torch.zeros(1, 1, n_embd)
-            self.time_maa_x = nn.Parameter(1.0 - torch.pow(ddd, ratio_1_to_almost0))
-            self.time_maa_r = nn.Parameter(torch.zeros_like(ddd))
-            self.time_maa_k = nn.Parameter(torch.zeros_like(ddd))
-            self.time_maa_v = nn.Parameter(torch.zeros_like(ddd))
-            self.time_maa_w = nn.Parameter(torch.zeros_like(ddd))
+            # ddd = torch.zeros(1, 1, n_embd)
+            # self.time_maa_x = nn.Parameter(1.0 - torch.pow(ddd, ratio_1_to_almost0))
+            # self.time_maa_r = nn.Parameter(torch.zeros_like(ddd))
+            # self.time_maa_k = nn.Parameter(torch.zeros_like(ddd))
+            # self.time_maa_v = nn.Parameter(torch.zeros_like(ddd))
+            # self.time_maa_w = nn.Parameter(torch.zeros_like(ddd))
 
-            D_MIX_LORA = 32 if n_embd < 4096 else 64
-            self.time_maa_w2 = nn.Parameter(torch.zeros(4, D_MIX_LORA, n_embd).uniform_(-0.01, 0.01))
-            self.time_maa_w1 = nn.Parameter(torch.zeros(n_embd, D_MIX_LORA*self.time_maa_w2.size(0)))
+            # D_MIX_LORA = 32 if n_embd < 4096 else 64
+            # self.time_maa_w2 = nn.Parameter(torch.zeros(4, D_MIX_LORA, n_embd).uniform_(-0.01, 0.01))
+            # self.time_maa_w1 = nn.Parameter(torch.zeros(n_embd, D_MIX_LORA*self.time_maa_w2.size(0)))
+
+            self.feature_map = nn.Parameter(torch.zeros(self.num_heads, self.head_dim, self.head_dim) + torch.eye(self.head_dim))
+            #self.feature_map_bias = nn.Parameter(torch.zeros(self.num_heads, self.head_dim))
 
             # per-head RWKV-6
             H = self.num_heads
-            # fancy time_decay
-            decay_speed = torch.ones(H)
-            for h in range(H):
-                decay_speed[h] = -6 + 5 * (h / max(H - 1, 1)) ** (0.7 + 1.3 * ratio_0_to_1)
-            self.time_decay = nn.Parameter(decay_speed)
-            #self.time_decay = nn.Parameter(torch.empty(H)).uniform_(-8, -7)
-            D_DECAY_LORA = 64 if n_embd < 4096 else 128
-            self.time_decay_w1 = nn.Parameter(torch.zeros(n_embd, D_DECAY_LORA))
-            self.time_decay_w2 = nn.Parameter(torch.zeros(D_DECAY_LORA, H).uniform_(-0.01, 0.01))
+            # # fancy time_decay
+            # decay_speed = torch.ones(H)
+            # for h in range(H):
+            #     decay_speed[h] = -6 + 5 * (h / max(H - 1, 1)) ** (0.7 + 1.3 * ratio_0_to_1)
+            # self.time_decay = nn.Parameter(decay_speed)
+            # #self.time_decay = nn.Parameter(torch.empty(H)).uniform_(-8, -7)
+            # D_DECAY_LORA = 64 if n_embd < 4096 else 128
+            # self.time_decay_w1 = nn.Parameter(torch.zeros(n_embd, D_DECAY_LORA))
+            # self.time_decay_w2 = nn.Parameter(torch.zeros(D_DECAY_LORA, H).uniform_(-0.01, 0.01))
 
             # # RWKV-6
             # decay_speed = torch.ones(dim_att)
@@ -278,7 +299,7 @@ class TMix_qwen2rwkv(TMix_qwen2):
             #     tmp[n] = ratio_0_to_1 * (1 - (n / (dim_att - 1))) + zigzag
             # self.time_faaaa = nn.Parameter(tmp.reshape(self.n_head, self.head_size))
 
-        self.ln_x = nn.LayerNorm(dim_att)
+        #self.ln_x = nn.LayerNorm(dim_att)
 
     def segsum(self, w_log): # B H L 1
         w_log_cumsum = torch.cumsum(w_log, dim=-2) # (B, H, L, 1)
@@ -287,48 +308,149 @@ class TMix_qwen2rwkv(TMix_qwen2):
 
     def forward(self, x, last_model_state:ModelState, shared:Shared, output_attentions:bool=False):
         last_state = last_model_state.block_states[self.layer_id].time_mix_state
-        bsz, q_len, hidden_dim = x.size()
+        B, T, C = x.size()
+        K = self.head_dim
+        KVH = self.num_key_value_heads
+        H = self.num_heads
 
-        dxprev = torch.nn.functional.pad(x, (0, 0, 1, -1)) - x
+        # dxprev = torch.nn.functional.pad(x, (0, 0, 1, -1)) - x
 
-        xxx = x + dxprev * self.time_maa_x
-        xxx = torch.tanh(xxx @ self.time_maa_w1).view(bsz*q_len, self.time_maa_w2.size(0), -1).transpose(0, 1)
-        xxx = torch.bmm(xxx, self.time_maa_w2).view(self.time_maa_w2.size(0), bsz, q_len, hidden_dim)
+        # xxx = x + dxprev * self.time_maa_x
+        # xxx = torch.tanh(xxx @ self.time_maa_w1).view(bsz*q_len, self.time_maa_w2.size(0), -1).transpose(0, 1)
+        # xxx = torch.bmm(xxx, self.time_maa_w2).view(self.time_maa_w2.size(0), bsz, q_len, hidden_dim)
 
-        mr, mk, mv, mw = xxx.unbind(dim=0)
-        #mr, mk, mv = xxx.unbind(dim=0)
-        xr = x + dxprev * (self.time_maa_r + mr)
-        xk = x + dxprev * (self.time_maa_k + mk)
-        xv = x + dxprev * (self.time_maa_v + mv)
-        xw = x + dxprev * (self.time_maa_w + mw)
+        # mr, mk, mv, mw = xxx.unbind(dim=0)
+        # #mr, mk, mv = xxx.unbind(dim=0)
+        # xr = x + dxprev * (self.time_maa_r + mr)
+        # xk = x + dxprev * (self.time_maa_k + mk)
+        # xv = x + dxprev * (self.time_maa_v + mv)
+        # xw = x + dxprev * (self.time_maa_w + mw)
 
-        query_states = self.q_proj(xr)
-        key_states = self.k_proj(xk)
-        value_states = self.v_proj(xv)
+        xr, xk, xv = x, x, x
+
+        q = self.q_proj(xr)
+        k = self.k_proj(xk)
+        v = self.v_proj(xv)
         #decay_states = self.time_decay.view(1,1,H,1).expand(bsz,q_len,H,1).contiguous()
-        decay_states = (self.time_decay + torch.tanh(xw @ self.time_decay_w1) @ self.time_decay_w2).to(query_states.dtype)
+        # decay_states = (self.time_decay + torch.tanh(xw @ self.time_decay_w1) @ self.time_decay_w2).to(query_states.dtype)
 
-        query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
-        key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
-        value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
-        decay_states = decay_states.view(bsz, q_len, self.num_heads, 1).transpose(1, 2)
+        q = q.view(B, T, -1, K).transpose(1, 2).view(B, -1, T, K)
+        k = k.view(B, T, -1, K).transpose(1, 2).view(B, -1, T, K)
+
+        cos, sin = shared.angles.unbind(0)
+        q, k = apply_rotary_pos_emb(q, k, cos, sin)
+        q = q.to(v.dtype)
+        k = k.to(v.dtype)
+
+        #k = repeat_kv(k, self.num_key_value_groups)
+        
+
+        q = q.transpose(1,2).view(B, T, -1, K)
+        k = k.transpose(1,2).view(B, T, -1, K)
+
+        q = q.view(B, T, H, 1, K)
+        q = q @ self.feature_map# + self.feature_map_bias.unsqueeze(-2)
+        q = q.transpose(1, 2).view(B, H, T, K)
+
+        k = k.view(B, T, KVH, K)
+        k = repeat_k(k, self.num_key_value_groups)
+        k = k.view(B, T, H, 1, K)
+        k = k @ self.feature_map# + self.feature_map_bias.unsqueeze(-2)
+        k = k.transpose(1, 2).view(B, H, T, K)
+
+        #q = torch.softmax(q, dim=-1)
+        #k = torch.softmax(k, dim=-1)
+
+        # q = q.float()
+        # k = k.float()
+
+        #qmax = q.abs().max()
+        #q = q / qmax
+        #kmax = k.abs().max()
+        #k = k / kmax
+        
+
+        # q = q.float()
+        # k = k.float()
+
+        # phi
+        #q = torch.relu(q)
+        #k = torch.relu(k)
+        #q = torch.softmax(q, dim=-1)
+        #k = torch.softmax(k, dim=-1)
+        #q = rms_norm(q)
+        #k = rms_norm(k)
+        #qmax = q.max()
+        #kmax = k.max()
+        #print(qmax, kmax)
+        #m = torch.cat([q, k]).max()
+        #q = (q - m).exp().to(v.dtype)
+        #k = (k - m).exp().to(v.dtype)
+        #q = torch.cat([torch.where(q>0,q.exp(),0), torch.where(q<0,(-q).exp(),0)], dim=-1)
+        #k = torch.cat([torch.where(k>0,k.exp(),0), torch.where(k<0,(-k).exp(),0)], dim=-1)
+        #q = torch.cat([torch.where(q>0,q.exp(),0), torch.where(q<0,(-q).exp(),0), torch.where(q>0,(-q).exp(),0), torch.where(q<0,q.exp(),0)], dim=-1)
+        #k = torch.cat([torch.where(k>0,k.exp(),0), torch.where(k<0,(-k).exp(),0), torch.where(k<0,k.exp(),0), torch.where(k>0,(-k).exp(),0)], dim=-1)
+        q = torch.cat([torch.softmax(q, dim=-1), torch.softmax(-q, dim=-1)], dim=-1)
+        k = torch.cat([torch.softmax(k, dim=-1), torch.softmax(-k, dim=-1)], dim=-1)
+        #q = torch.cat([torch.where(q>0,torch.softmax(q, dim=-1),0), torch.where(q<0,torch.softmax(-q, dim=-1),0)], dim=-1)
+        #k = torch.cat([torch.where(k>0,torch.softmax(k, dim=-1),0), torch.where(k<0,torch.softmax(-k, dim=-1),0)], dim=-1)
+        #q = torch.cat([q.exp().to(v.dtype), (-q).exp().to(v.dtype)], dim=-1)
+        #k = torch.cat([k.exp().to(v.dtype), (-k).exp().to(v.dtype)], dim=-1)
+
+
+        # q = torch.cat([torch.relu(q), torch.relu(-q), torch.relu(q), torch.relu(-q)], dim=-1) # add 2x2 truth table so +,+ and -,- work normally but -,+ and +,- give low (or zero) contribution
+        # k = torch.cat([torch.relu(k), torch.relu(-k), torch.relu(-k), torch.relu(k)], dim=-1)
+        #q = torch.cat([torch.relu(q), torch.relu(-q)], dim=-1) # add 2x2 truth table so +,+ and -,- work normally but -,+ and +,- give zero contribution
+        #k = torch.cat([torch.relu(k), torch.relu(-k)], dim=-1)
+        #q = torch.cat([torch.exp(torch.relu(q)-3), torch.exp(torch.relu(-q)-3)], dim=-1) # add 2x2 truth table so +,+ and -,- work normally but -,+ and +,- give zero contribution
+        #k = torch.cat([torch.exp(torch.relu(k)-3), torch.exp(torch.relu(-k)-3)], dim=-1)
+        #q = torch.cat([torch.softmax(torch.relu(q), dim=-1), torch.softmax(torch.relu(-q), dim=-1)], dim=-1)
+        #k = torch.cat([torch.softmax(torch.relu(k), dim=-1), torch.softmax(torch.relu(-k), dim=-1)], dim=-1)
+        #q = torch.cat([torch.where(q>0,1,0)+torch.relu(q)**2, torch.where(q<0,1,0)+torch.relu(-q)**2, torch.where(q>0,0,-1)+torch.relu(q/2).exp(), torch.where(q<0,0,-1)+torch.relu(-q/2).exp()], dim=-1)
+        #k = torch.cat([torch.where(k>0,1,0)+torch.relu(k)**2, torch.where(k<0,1,0)+torch.relu(-k)**2, torch.where(k<0,0,-1)+torch.relu(-k/2).exp(), torch.where(k>0,0,-1)+torch.relu(k/2).exp()], dim=-1)
+        #q = torch.cat([torch.where(q>0,torch.softmax(q,dim=-1),0), torch.where(q<0,torch.softmax(-q,dim=-1),0)], dim=-1)
+        #k = torch.cat([torch.where(k>0,torch.softmax(k,dim=-1),0), torch.where(k<0,torch.softmax(-k,dim=-1),0)], dim=-1)
+        # q = torch.cat([torch.where(q>0,(1+q)**2,0), torch.where(q<0,(1-q)**2,0)], dim=-1)
+        # k = torch.cat([torch.where(k>0,(1+k)**2,0), torch.where(k<0,(1-k)**2,0)], dim=-1)
+        #q = torch.cat([torch.where(q>0,(1+q)**2,0), torch.where(q<0,(1-q)**2,0), torch.where(q>0,0.1,0), torch.where(q<0,0.1,0)], dim=-1)
+        #k = torch.cat([torch.where(k>0,(1+k)**2,0), torch.where(k<0,(1-k)**2,0), torch.where(k<0,0.1,0), torch.where(k>0,0.1,0)], dim=-1)
+        #q = torch.cat([torch.where(q>0,(1+q),0), torch.where(q<0,(1-q),0)], dim=-1)
+        #k = torch.cat([torch.where(k>0,(1+k),0), torch.where(k<0,(1-k),0)], dim=-1)
+        #q = torch.cat([torch.where(q>0,torch.softmax(q,dim=-1),0), torch.where(q<0,torch.softmax(-q,dim=-1),0), torch.where(q>0,torch.softmax(q,dim=-1),0), torch.where(q<0,torch.softmax(-q,dim=-1),0)], dim=-1)
+        #k = torch.cat([torch.where(k>0,torch.softmax(k,dim=-1),0), torch.where(k<0,torch.softmax(-k,dim=-1),0), torch.where(k<0,torch.softmax(-k,dim=-1),0), torch.where(k>0,torch.softmax(k,dim=-1),0)], dim=-1)
+
+        #q = torch.relu(q)
+        #k = torch.relu(k)
+
+        # second phi to disallow RoPE to make our attention scores negative!
+        #q = 25*F.sigmoid(q)**8 #F.softplus(q)
+        #k = 25*F.sigmoid(k)**8 #F.softplus(k)
+
+        #q = rms_norm(q)
+        #k = rms_norm(k)
+
+
+        v = v.view(B, T, KVH, K).transpose(1, 2)
+        # decay_states = decay_states.view(bsz, q_len, H, 1).transpose(1, 2)
+
 
         # repeat k/v heads if n_kv_heads < n_heads
-        key_states = repeat_kv(key_states, self.num_key_value_groups)
-        value_states = repeat_kv(value_states, self.num_key_value_groups)
+        #k = repeat_kv(k, self.num_key_value_groups)
+        v = repeat_kv(v, self.num_key_value_groups)
         #dropout_rate = 0.0 if not self.training else self.attention_dropout
 
-        decay_states_log = -decay_states.float().exp()
-        decay_states_log = decay_states_log.clamp(-5) # FIXME - is this necessary?
-        key_states = (key_states * (1 - decay_states_log.exp())).to(key_states.dtype)
+        #v_mean_head_norms = v.norm(2, dim=-1).mean([0,2])
+
+        # decay_states_log = -decay_states.float().exp()
+        # decay_states_log = decay_states_log.clamp(-5) # FIXME - is this necessary?
+        # key_states = (key_states * (1 - decay_states_log.exp())).to(key_states.dtype)
 
         # kv_seq_len = key_states.shape[-2]
         # cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
         # query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)#, position_ids)
-        cos, sin = shared.angles.unbind(0)
-        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
-        query_states = query_states.to(value_states.dtype)
-        key_states = key_states.to(value_states.dtype)
+        #q = q.to(v.dtype)
+        #k = k.to(v.dtype)
+
 
         # # In PEFT, usually we cast the layer norms in float32 for training stability reasons
         # # therefore the input hidden states gets silently casted in float32. Hence, we need
@@ -359,18 +481,34 @@ class TMix_qwen2rwkv(TMix_qwen2):
 
         #print("layer", self.layer_id, "post", bool(query_states.isnan().any()), bool(key_states.isnan().any()), bool(value_states.isnan().any()), bool(decay_states_log.isnan().any()))
 
-        if not output_attentions:
-            attn_weights = torch.empty(0, device=x.device)
 
-            attn_output = fla_chunk_simple_gla(query_states, key_states, value_states, decay_states_log.view(bsz, self.num_heads, q_len))[0]
+        attn_weights = q @ k.mT
+        #attn_weights = (q * (self.head_dim ** -0.5)) @ k.mT
+        #attn_weights = attn_weights.exp()
+        attn_weights = attn_weights.tril()
+        #print('row sum weights', float(attn_weights.mean(-1).min()), float(attn_weights.mean(-1).max()), float(attn_weights.mean(-1).mean()))
+        attn_weights = attn_weights / (attn_weights.sum(-1) + 1e-8).view(B, H, T, 1).expand(-1, -1, -1, T)
+        #attn_weights = attn_weights / attn_weights.sum(dim=-1, keepdim=True)
+        #causal_mask = torch.full([T, T], fill_value=-torch.inf, device=attn_weights.device, dtype=attn_weights.dtype).triu(1)
+        #attn_weights = nn.functional.softmax(attn_weights + causal_mask, dim=-1).to(v.dtype)
+        #attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(v.dtype)
+        
+        # attn_weights = attn_weights.float() * self.segsum(decay_states_log.float()) # NOTE - without the explicit cast to float ddp mismatched deepspeed here
+        attn_weights = attn_weights.to(v.dtype)
+
+        if not output_attentions:
+            attn_output = attn_weights @ v
+            #attn_output = attn_output / (attn_weights.sum(-1) + 1e-8).view(B, H, T, 1)
+            #ratio = (v_mean_head_norms * (attn_output.size(-1) ** -0.5)).view(self.num_heads, 1, 1)
+            #attn_output = rms_norm(attn_output) * ratio
             attn_output = attn_output.transpose(1, 2).contiguous()
-            attn_output = attn_output.view(bsz, q_len, self.hidden_size)
-            attn_output = self.ln_x(attn_output)
+            attn_output = attn_output.view(B, T, self.hidden_size)
+            #attn_output = self.ln_x(attn_output)
+            #attn_output = rms_norm(attn_output) * (v_mean_norm * (self.hidden_size ** -0.5))
             attn_output = self.o_proj(attn_output)
+
+            attn_weights = torch.empty(0, device=x.device)
         else:
-            attn_weights = (query_states * (key_states.size(-1) ** -0.5)) @ key_states.mT
-            attn_weights = attn_weights.float() * self.segsum(decay_states_log.float()) # NOTE - without the explicit cast to float ddp mismatched deepspeed here
-            attn_weights = attn_weights.to(query_states.dtype)
             attn_output = torch.empty(0, device=x.device)
     
         return attn_output, TimeMixState(last_state.wkv_state, last_state.shift_state), attn_weights #, past_key_value
@@ -575,20 +713,45 @@ class Model_qwen2(nn.Module): # Qwen2CausalLM
         train_config = self.config.train
 
         if train_config.teacher is not None and train_config.teacher.attention_distillation_stage <= 2:
-            self.model.embed_tokens.requires_grad_(False)
+            self.model.requires_grad_(False)
             for decoder_layer in self.model.layers:
-                decoder_layer.post_attention_layernorm.requires_grad_(False)
-                for p in decoder_layer.mlp.parameters():
-                    p.requires_grad_(False)
                 if train_config.teacher.attention_distillation_stage <= 1:
-                    decoder_layer.self_attn.time_maa_v.requires_grad_(False)
-                    decoder_layer.self_attn.v_proj.weight.requires_grad_(False)
-                    decoder_layer.self_attn.v_proj.bias.requires_grad_(False)
-                    decoder_layer.self_attn.o_proj.weight.requires_grad_(False)
-                    decoder_layer.self_attn.ln_x.weight.requires_grad_(False)
-                    decoder_layer.self_attn.ln_x.bias.requires_grad_(False)
-            self.model.norm.requires_grad_(False)
-            self.lm_head.requires_grad_(False)
+                    decoder_layer.self_attn.q_proj.weight.requires_grad_(True)
+                    decoder_layer.self_attn.q_proj.bias.requires_grad_(True)
+                    decoder_layer.self_attn.k_proj.weight.requires_grad_(True)
+                    decoder_layer.self_attn.k_proj.bias.requires_grad_(True)
+
+                    decoder_layer.self_attn.feature_map.requires_grad_(True)
+                    #decoder_layer.self_attn.feature_map_bias.requires_grad_(True)
+                    #decoder_layer.self_attn.time_maa_x.requires_grad_(False)
+                    
+                    #decoder_layer.self_attn.time_maa_r.requires_grad_(False)
+                    #decoder_layer.self_attn.time_maa_k.requires_grad_(False)
+                    #decoder_layer.self_attn.time_maa_w.requires_grad_(False)
+                    #decoder_layer.self_attn.time_maa_w1.requires_grad_(False)
+                    #decoder_layer.self_attn.time_maa_w2.requires_grad_(False)
+                    #decoder_layer.self_attn.time_decay.requires_grad_(False)
+                    #decoder_layer.self_attn.time_decay_w1.requires_grad_(False)
+                    #decoder_layer.self_attn.time_decay_w2.requires_grad_(False)
+
+                    #decoder_layer.self_attn.ln_x.weight.requires_grad_(True)
+                    #decoder_layer.self_attn.ln_x.bias.requires_grad_(True)
+                if train_config.teacher.attention_distillation_stage == 2:
+                    decoder_layer.self_attn.q_proj.weight.requires_grad_(True)
+                    decoder_layer.self_attn.q_proj.bias.requires_grad_(True)
+                    decoder_layer.self_attn.k_proj.weight.requires_grad_(True)
+                    decoder_layer.self_attn.k_proj.bias.requires_grad_(True)
+                    decoder_layer.self_attn.feature_map.requires_grad_(True)
+                    
+                    #decoder_layer.self_attn.time_maa_v.requires_grad_(False)
+                    decoder_layer.self_attn.v_proj.weight.requires_grad_(True)
+                    decoder_layer.self_attn.v_proj.bias.requires_grad_(True)
+                    #decoder_layer.self_attn.ln_x.weight.requires_grad_(True)
+                    #decoder_layer.self_attn.ln_x.bias.requires_grad_(True)
+                    decoder_layer.self_attn.o_proj.weight.requires_grad_(True)
+
+            #self.model.norm.requires_grad_(False)
+            #self.lm_head.requires_grad_(False)
 
         # # FIXME - remove these for full training
         # for decoder_layer in self.model.layers:
@@ -646,12 +809,13 @@ class Model_qwen2(nn.Module): # Qwen2CausalLM
                 module.weight.data[module.padding_idx].zero_()
 
     def init_all_weights(self):
-        for n, p in self.named_parameters():
-            requires_grad_temp = p.requires_grad
-            p.requires_grad_(False)
-            if n.endswith('.ln_x.weight'):
-                layer_scale = (1+int(n.split('.')[2])) / self.config.model.n_layer
-                print('.ln_x.weight layer', int(n.split('.')[2]), "scale", (layer_scale ** 0.7))
-                p *= 0.0
-                p += (layer_scale ** 0.7)
-            p.requires_grad = requires_grad_temp
+        pass
+        # for n, p in self.named_parameters():
+        #     requires_grad_temp = p.requires_grad
+        #     p.requires_grad_(False)
+        #     if n.endswith('.ln_x.weight'):
+        #         layer_scale = (1+int(n.split('.')[2])) / self.config.model.n_layer
+        #         print('.ln_x.weight layer', int(n.split('.')[2]), "scale", (layer_scale ** 0.7))
+        #         p *= 0.0
+        #         p += (layer_scale ** 0.7)
+        #     p.requires_grad = requires_grad_temp

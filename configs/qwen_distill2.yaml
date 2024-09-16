@@ -18,19 +18,19 @@ train:
   proj_name: qwen2-0B5
   proj_suffix: 2
   train_stage: 3
-  #load_model: /home/recursal/LinearAttentionArena/out/qwen2-0B5.safetensors
+  #load_model: out/qwen2-0B5.safetensors
   #load_partial: 1
-  load_model: /home/recursal/LinearAttentionArena/out/qwen2-0B5-1/rwkv-final.pth
+  load_model: out/qwen2-0B5-1/rwkv-final.pth
   load_partial: 0
 
   data_type: "binidx" 
-  data_file: "data/minipile_qwen2" 
-  my_exit_tokens: 40000000 # 1491785955
-  magic_prime: 2913641 # 364193
+  data_file: "data/dclm-10B" #"data/minipile_qwen2" 
+  my_exit_tokens: 20000000 # 1491785955
+  magic_prime: 2929793 # 2913641 # 364193
 
   lr_init: 3e-4
   lr_final: 1e-8
-  warmup_steps: 500 
+  warmup_steps: 50
   beta1: 0.9 
   beta2: 0.95
   adam_eps: 1e-8 
@@ -38,14 +38,14 @@ train:
 
   devices: 4
   num_nodes: 1
-  micro_bsz: 8
-  accumulate_grad_batches: 1
+  micro_bsz: 4
+  accumulate_grad_batches: 2 # total bsz 32
   strategy: deepspeed_stage_1
   grad_cp: 0
   ds_bucket_mb: 2 # set to 2 for consumer GPUs, set to 200 for A100 / H100 (affects speed & vram usage)
   
   teacher:
-    path: /home/recursal/LinearAttentionArena/out/qwen2-0B5.safetensors
+    path: out/qwen2-0B5.safetensors
     attention_distillation_stage: 2
     model:
       __type__: configs.Transformer_Config
