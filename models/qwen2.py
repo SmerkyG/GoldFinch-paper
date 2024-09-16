@@ -299,7 +299,7 @@ class TMix_qwen2rwkv(TMix_qwen2):
             #     tmp[n] = ratio_0_to_1 * (1 - (n / (dim_att - 1))) + zigzag
             # self.time_faaaa = nn.Parameter(tmp.reshape(self.n_head, self.head_size))
 
-        self.ln_x = nn.LayerNorm(dim_att)
+        #self.ln_x = nn.LayerNorm(dim_att)
 
     def segsum(self, w_log): # B H L 1
         w_log_cumsum = torch.cumsum(w_log, dim=-2) # (B, H, L, 1)
@@ -487,8 +487,7 @@ class TMix_qwen2rwkv(TMix_qwen2):
         #attn_weights = attn_weights.exp()
         attn_weights = attn_weights.tril()
         #print('row sum weights', float(attn_weights.mean(-1).min()), float(attn_weights.mean(-1).max()), float(attn_weights.mean(-1).mean()))
-        if output_attentions:
-            attn_weights = attn_weights / (attn_weights.sum(-1) + 1e-8).view(B, H, T, 1).expand(-1, -1, -1, T)
+        attn_weights = attn_weights / (attn_weights.sum(-1) + 1e-8).view(B, H, T, 1).expand(-1, -1, -1, T)
         #attn_weights = attn_weights / attn_weights.sum(dim=-1, keepdim=True)
         #causal_mask = torch.full([T, T], fill_value=-torch.inf, device=attn_weights.device, dtype=attn_weights.dtype).triu(1)
         #attn_weights = nn.functional.softmax(attn_weights + causal_mask, dim=-1).to(v.dtype)
@@ -504,7 +503,7 @@ class TMix_qwen2rwkv(TMix_qwen2):
             #attn_output = rms_norm(attn_output) * ratio
             attn_output = attn_output.transpose(1, 2).contiguous()
             attn_output = attn_output.view(B, T, self.hidden_size)
-            attn_output = self.ln_x(attn_output)
+            #attn_output = self.ln_x(attn_output)
             #attn_output = rms_norm(attn_output) * (v_mean_norm * (self.hidden_size ** -0.5))
             attn_output = self.o_proj(attn_output)
 
@@ -717,10 +716,15 @@ class Model_qwen2(nn.Module): # Qwen2CausalLM
             self.model.requires_grad_(False)
             for decoder_layer in self.model.layers:
                 if train_config.teacher.attention_distillation_stage <= 1:
-                    #decoder_layer.self_attn.q_proj.weight.requires_grad_(True)
-                    #decoder_layer.self_attn.q_proj.bias.requires_grad_(True)
-                    #decoder_layer.self_attn.k_proj.weight.requires_grad_(True)
-                    #decoder_layer.self_attn.k_proj.bias.requires_grad_(True)
+                    decoder_layer.self_attn.time_maa_x.requires_grad_(True)
+                    
+                    decoder_layer.self_attn.time_maa_r.requires_grad_(True)
+                    decoder_layer.self_attn.time_maa_k.requires_grad_(True)
+
+                    decoder_layer.self_attn.q_proj.weight.requires_grad_(True)
+                    decoder_layer.self_attn.q_proj.bias.requires_grad_(True)
+                    decoder_layer.self_attn.k_proj.weight.requires_grad_(True)
+                    decoder_layer.self_attn.k_proj.bias.requires_grad_(True)
 
                     # decoder_layer.self_attn.time_decay.requires_grad_(True)
                     # decoder_layer.self_attn.time_decay_w1.requires_grad_(True)
@@ -748,8 +752,8 @@ class Model_qwen2(nn.Module): # Qwen2CausalLM
                     decoder_layer.self_attn.time_maa_v.requires_grad_(False)
                     decoder_layer.self_attn.v_proj.weight.requires_grad_(True)
                     decoder_layer.self_attn.v_proj.bias.requires_grad_(True)
-                    decoder_layer.self_attn.ln_x.weight.requires_grad_(True)
-                    decoder_layer.self_attn.ln_x.bias.requires_grad_(True)
+                    #decoder_layer.self_attn.ln_x.weight.requires_grad_(True)
+                    #decoder_layer.self_attn.ln_x.bias.requires_grad_(True)
                     decoder_layer.self_attn.o_proj.weight.requires_grad_(True)
 
             #self.model.norm.requires_grad_(False)
