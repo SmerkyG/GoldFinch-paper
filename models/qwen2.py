@@ -299,7 +299,7 @@ class TMix_qwen2rwkv(TMix_qwen2):
             #     tmp[n] = ratio_0_to_1 * (1 - (n / (dim_att - 1))) + zigzag
             # self.time_faaaa = nn.Parameter(tmp.reshape(self.n_head, self.head_size))
 
-        #self.ln_x = nn.LayerNorm(dim_att)
+        self.ln_x = nn.LayerNorm(dim_att)
 
     def segsum(self, w_log): # B H L 1
         w_log_cumsum = torch.cumsum(w_log, dim=-2) # (B, H, L, 1)
@@ -503,7 +503,7 @@ class TMix_qwen2rwkv(TMix_qwen2):
             #attn_output = rms_norm(attn_output) * ratio
             attn_output = attn_output.transpose(1, 2).contiguous()
             attn_output = attn_output.view(B, T, self.hidden_size)
-            #attn_output = self.ln_x(attn_output)
+            attn_output = self.ln_x(attn_output)
             #attn_output = rms_norm(attn_output) * (v_mean_norm * (self.hidden_size ** -0.5))
             attn_output = self.o_proj(attn_output)
 
@@ -744,11 +744,11 @@ class Model_qwen2(nn.Module): # Qwen2CausalLM
                     decoder_layer.self_attn.k_proj.bias.requires_grad_(True)
                     decoder_layer.self_attn.feature_map.requires_grad_(True)
                     
-                    decoder_layer.self_attn.time_maa_v.requires_grad_(True)
+                    decoder_layer.self_attn.time_maa_v.requires_grad_(False)
                     decoder_layer.self_attn.v_proj.weight.requires_grad_(True)
                     decoder_layer.self_attn.v_proj.bias.requires_grad_(True)
-                    #decoder_layer.self_attn.ln_x.weight.requires_grad_(True)
-                    #decoder_layer.self_attn.ln_x.bias.requires_grad_(True)
+                    decoder_layer.self_attn.ln_x.weight.requires_grad_(True)
+                    decoder_layer.self_attn.ln_x.bias.requires_grad_(True)
                     decoder_layer.self_attn.o_proj.weight.requires_grad_(True)
 
             #self.model.norm.requires_grad_(False)
