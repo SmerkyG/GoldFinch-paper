@@ -716,11 +716,6 @@ class Model_qwen2(nn.Module): # Qwen2CausalLM
             self.model.requires_grad_(False)
             for decoder_layer in self.model.layers:
                 if train_config.teacher.attention_distillation_stage <= 1:
-                    decoder_layer.self_attn.time_maa_x.requires_grad_(True)
-                    
-                    decoder_layer.self_attn.time_maa_r.requires_grad_(True)
-                    decoder_layer.self_attn.time_maa_k.requires_grad_(True)
-
                     decoder_layer.self_attn.q_proj.weight.requires_grad_(True)
                     decoder_layer.self_attn.q_proj.bias.requires_grad_(True)
                     decoder_layer.self_attn.k_proj.weight.requires_grad_(True)
