@@ -721,22 +721,23 @@ class Model_qwen2(nn.Module): # Qwen2CausalLM
                     #decoder_layer.self_attn.k_proj.weight.requires_grad_(True)
                     #decoder_layer.self_attn.k_proj.bias.requires_grad_(True)
 
+                    # decoder_layer.self_attn.time_decay.requires_grad_(True)
+                    # decoder_layer.self_attn.time_decay_w1.requires_grad_(True)
+                    # decoder_layer.self_attn.time_decay_w2.requires_grad_(True)
+
                     decoder_layer.self_attn.feature_map.requires_grad_(True)
                     #decoder_layer.self_attn.feature_map_bias.requires_grad_(True)
-                    #decoder_layer.self_attn.time_maa_x.requires_grad_(False)
-                    
-                    #decoder_layer.self_attn.time_maa_r.requires_grad_(False)
-                    #decoder_layer.self_attn.time_maa_k.requires_grad_(False)
-                    #decoder_layer.self_attn.time_maa_w.requires_grad_(False)
-                    #decoder_layer.self_attn.time_maa_w1.requires_grad_(False)
-                    #decoder_layer.self_attn.time_maa_w2.requires_grad_(False)
-                    #decoder_layer.self_attn.time_decay.requires_grad_(False)
-                    #decoder_layer.self_attn.time_decay_w1.requires_grad_(False)
-                    #decoder_layer.self_attn.time_decay_w2.requires_grad_(False)
-
                     #decoder_layer.self_attn.ln_x.weight.requires_grad_(True)
                     #decoder_layer.self_attn.ln_x.bias.requires_grad_(True)
                 if train_config.teacher.attention_distillation_stage == 2:
+                    decoder_layer.self_attn.time_maa_x.requires_grad_(True)
+                    
+                    decoder_layer.self_attn.time_maa_r.requires_grad_(True)
+                    decoder_layer.self_attn.time_maa_k.requires_grad_(True)
+                    #decoder_layer.self_attn.time_maa_w.requires_grad_(True)
+                    decoder_layer.self_attn.time_maa_w1.requires_grad_(True)
+                    decoder_layer.self_attn.time_maa_w2.requires_grad_(True)
+
                     decoder_layer.self_attn.q_proj.weight.requires_grad_(True)
                     decoder_layer.self_attn.q_proj.bias.requires_grad_(True)
                     decoder_layer.self_attn.k_proj.weight.requires_grad_(True)
