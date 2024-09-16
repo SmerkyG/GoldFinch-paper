@@ -487,7 +487,8 @@ class TMix_qwen2rwkv(TMix_qwen2):
         #attn_weights = attn_weights.exp()
         attn_weights = attn_weights.tril()
         #print('row sum weights', float(attn_weights.mean(-1).min()), float(attn_weights.mean(-1).max()), float(attn_weights.mean(-1).mean()))
-        attn_weights = attn_weights / (attn_weights.sum(-1) + 1e-8).view(B, H, T, 1).expand(-1, -1, -1, T)
+        if output_attentions:
+            attn_weights = attn_weights / (attn_weights.sum(-1) + 1e-8).view(B, H, T, 1).expand(-1, -1, -1, T)
         #attn_weights = attn_weights / attn_weights.sum(dim=-1, keepdim=True)
         #causal_mask = torch.full([T, T], fill_value=-torch.inf, device=attn_weights.device, dtype=attn_weights.dtype).triu(1)
         #attn_weights = nn.functional.softmax(attn_weights + causal_mask, dim=-1).to(v.dtype)
