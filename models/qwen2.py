@@ -744,7 +744,7 @@ class Model_qwen2(nn.Module): # Qwen2CausalLM
                     decoder_layer.self_attn.k_proj.bias.requires_grad_(True)
                     decoder_layer.self_attn.feature_map.requires_grad_(True)
                     
-                    #decoder_layer.self_attn.time_maa_v.requires_grad_(False)
+                    decoder_layer.self_attn.time_maa_v.requires_grad_(True)
                     decoder_layer.self_attn.v_proj.weight.requires_grad_(True)
                     decoder_layer.self_attn.v_proj.bias.requires_grad_(True)
                     #decoder_layer.self_attn.ln_x.weight.requires_grad_(True)
