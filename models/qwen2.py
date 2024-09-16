@@ -253,22 +253,22 @@ class TMix_qwen2rwkv(TMix_qwen2):
             for i in range(n_embd):
                 ddd[0, 0, i] = i / n_embd
 
-            # self.time_maa_x = nn.Parameter(1.0 - torch.pow(ddd, ratio_1_to_almost0))
-            # self.time_maa_r = nn.Parameter(1.0 - torch.pow(ddd, 0.5 * ratio_1_to_almost0))
-            # self.time_maa_k = nn.Parameter(1.0 - torch.pow(ddd, ratio_1_to_almost0))
-            # self.time_maa_v = nn.Parameter(1.0 - (torch.pow(ddd, ratio_1_to_almost0) + 0.3 * ratio_0_to_1))
-            # self.time_maa_w = nn.Parameter(1.0 - torch.pow(ddd, ratio_1_to_almost0))
+            self.time_maa_x = nn.Parameter(1.0 - torch.pow(ddd, ratio_1_to_almost0))
+            self.time_maa_r = nn.Parameter(1.0 - torch.pow(ddd, 0.5 * ratio_1_to_almost0))
+            self.time_maa_k = nn.Parameter(1.0 - torch.pow(ddd, ratio_1_to_almost0))
+            self.time_maa_v = nn.Parameter(1.0 - (torch.pow(ddd, ratio_1_to_almost0) + 0.3 * ratio_0_to_1))
+            self.time_maa_w = nn.Parameter(1.0 - torch.pow(ddd, ratio_1_to_almost0))
 
-            # ddd = torch.zeros(1, 1, n_embd)
-            # self.time_maa_x = nn.Parameter(1.0 - torch.pow(ddd, ratio_1_to_almost0))
-            # self.time_maa_r = nn.Parameter(torch.zeros_like(ddd))
-            # self.time_maa_k = nn.Parameter(torch.zeros_like(ddd))
-            # self.time_maa_v = nn.Parameter(torch.zeros_like(ddd))
-            # self.time_maa_w = nn.Parameter(torch.zeros_like(ddd))
+            ddd = torch.zeros(1, 1, n_embd)
+            self.time_maa_x = nn.Parameter(1.0 - torch.pow(ddd, ratio_1_to_almost0))
+            self.time_maa_r = nn.Parameter(torch.zeros_like(ddd))
+            self.time_maa_k = nn.Parameter(torch.zeros_like(ddd))
+            self.time_maa_v = nn.Parameter(torch.zeros_like(ddd))
+            #self.time_maa_w = nn.Parameter(torch.zeros_like(ddd))
 
-            # D_MIX_LORA = 32 if n_embd < 4096 else 64
-            # self.time_maa_w2 = nn.Parameter(torch.zeros(4, D_MIX_LORA, n_embd).uniform_(-0.01, 0.01))
-            # self.time_maa_w1 = nn.Parameter(torch.zeros(n_embd, D_MIX_LORA*self.time_maa_w2.size(0)))
+            D_MIX_LORA = 32 if n_embd < 4096 else 64
+            self.time_maa_w2 = nn.Parameter(torch.zeros(3, D_MIX_LORA, n_embd).uniform_(-0.01, 0.01))
+            self.time_maa_w1 = nn.Parameter(torch.zeros(n_embd, D_MIX_LORA*self.time_maa_w2.size(0)))
 
             self.feature_map = nn.Parameter(torch.zeros(self.num_heads, self.head_dim, self.head_dim) + torch.eye(self.head_dim))
             #self.feature_map_bias = nn.Parameter(torch.zeros(self.num_heads, self.head_dim))
@@ -313,20 +313,20 @@ class TMix_qwen2rwkv(TMix_qwen2):
         KVH = self.num_key_value_heads
         H = self.num_heads
 
-        # dxprev = torch.nn.functional.pad(x, (0, 0, 1, -1)) - x
+        dxprev = torch.nn.functional.pad(x, (0, 0, 1, -1)) - x
 
-        # xxx = x + dxprev * self.time_maa_x
-        # xxx = torch.tanh(xxx @ self.time_maa_w1).view(bsz*q_len, self.time_maa_w2.size(0), -1).transpose(0, 1)
-        # xxx = torch.bmm(xxx, self.time_maa_w2).view(self.time_maa_w2.size(0), bsz, q_len, hidden_dim)
+        xxx = x + dxprev * self.time_maa_x
+        xxx = torch.tanh(xxx @ self.time_maa_w1).view(B*T, self.time_maa_w2.size(0), -1).transpose(0, 1)
+        xxx = torch.bmm(xxx, self.time_maa_w2).view(self.time_maa_w2.size(0), B, T, C)
 
-        # mr, mk, mv, mw = xxx.unbind(dim=0)
-        # #mr, mk, mv = xxx.unbind(dim=0)
-        # xr = x + dxprev * (self.time_maa_r + mr)
-        # xk = x + dxprev * (self.time_maa_k + mk)
-        # xv = x + dxprev * (self.time_maa_v + mv)
-        # xw = x + dxprev * (self.time_maa_w + mw)
+        #mr, mk, mv, mw = xxx.unbind(dim=0)
+        mr, mk, mv = xxx.unbind(dim=0)
+        xr = x + dxprev * (self.time_maa_r + mr)
+        xk = x + dxprev * (self.time_maa_k + mk)
+        xv = x + dxprev * (self.time_maa_v + mv)
+        #xw = x + dxprev * (self.time_maa_w + mw)
 
-        xr, xk, xv = x, x, x
+        #xr, xk, xv = x, x, x
 
         q = self.q_proj(xr)
         k = self.k_proj(xk)
