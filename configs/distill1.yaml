@@ -5,7 +5,7 @@ train:
 
   data_type: "binidx" 
   data_file: "data/dclm-10B" #data/minipile_qwen2" 
-  my_exit_tokens: 20000000 # 1491785955
+  my_exit_tokens: 40000000 # 1491785955
   magic_prime: 2929793 # 2913641 # 364193
 
   lr_init: 1e-3
