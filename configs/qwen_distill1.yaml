@@ -18,9 +18,9 @@ train:
   proj_name: qwen2-0B5
   proj_suffix: 1
   train_stage: 3
-  #load_model: out/qwen2-0B5-1/rwkv-init.pth
-  load_model: out/qwen2-0B5.safetensors
-  load_partial: 1
+  load_model: out/qwen2-0B5-1/rwkv-init.pth
+  #load_model: out/qwen2-0B5.safetensors
+  #load_partial: 1
 
   data_type: "binidx" 
   data_file: "data/dclm-10B" #"data/minipile_qwen2" 
