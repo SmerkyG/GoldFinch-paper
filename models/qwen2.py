@@ -270,7 +270,7 @@ class TMix_qwen2rwkv(TMix_qwen2):
             self.time_maa_w2 = nn.Parameter(torch.zeros(4, D_MIX_LORA, n_embd).uniform_(-0.01, 0.01))
             self.time_maa_w1 = nn.Parameter(torch.zeros(n_embd, D_MIX_LORA*self.time_maa_w2.size(0)))
 
-            self.feature_map = nn.Parameter(torch.zeros(self.num_heads, self.head_dim, self.head_dim) + torch.eye(self.head_dim))
+            #self.feature_map = nn.Parameter(torch.zeros(self.num_heads, self.head_dim, self.head_dim) + torch.eye(self.head_dim))
             #self.feature_map_bias = nn.Parameter(torch.zeros(self.num_heads, self.head_dim))
 
             # per-head RWKV-6
@@ -325,8 +325,6 @@ class TMix_qwen2rwkv(TMix_qwen2):
         xk = x + dxprev * (self.time_maa_k + mk)
         xv = x + dxprev * (self.time_maa_v + mv)
         xw = x + dxprev * (self.time_maa_w + mw)
-
-        #xr, xk, xv = x, x, x
 
         q = self.q_proj(xr)
         k = self.k_proj(xk)
