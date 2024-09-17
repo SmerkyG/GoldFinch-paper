@@ -6,7 +6,7 @@ train:
   load_partial: 0
 
   data_type: "binidx" 
-  data_file: "data/dclm-10B" #data/minipile_qwen2" 
+  data_file: "data/dclm-10B" #"data/minipile_qwen2" 
   my_exit_tokens: 1500000000 #1491785955
   magic_prime: 2929793 # 2913641 # 364193
 
@@ -30,3 +30,5 @@ train:
 
   teacher:
     attention_distillation_stage: 3
+    kl_weight: 1.0
+    ce_weight: 0.0
