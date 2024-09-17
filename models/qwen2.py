@@ -344,9 +344,6 @@ class TMix_qwen2rwkv(TMix_qwen2):
 
         #k = repeat_kv(k, self.num_key_value_groups)
         
-        #q = rms_norm(q)
-        #k = rms_norm(k)
-
         q = q.transpose(1,2).view(B, T, -1, K)
         k = k.transpose(1,2).view(B, T, -1, K)
 
@@ -372,8 +369,8 @@ class TMix_qwen2rwkv(TMix_qwen2):
         #k = k / kmax
         
 
-        # q = q.float()
-        # k = k.float()
+        q = q.float()
+        k = k.float()
 
         # phi
         #q = torch.relu(q)
@@ -382,13 +379,15 @@ class TMix_qwen2rwkv(TMix_qwen2):
         #k = torch.softmax(k, dim=-1)
         #q = F.tanh(q * 1e-3)
         #k = F.tanh(k * 1e-3)
-        dd = 512
-        q = (2*dd) * F.sigmoid(q/(dd/4)) - dd
-        k = (2*dd) * F.sigmoid(k/(dd/4)) - dd
+        cap = 50
+        q = cap * torch.tanh(q / cap)
+        k = cap * torch.tanh(k / cap)
         #q = torch.cat([(q*0.5).exp(), (q*-0.5).exp()], dim=-1)
         #k = torch.cat([(k*0.5).exp(), (k*-0.5).exp()], dim=-1)
         q = torch.cat([torch.where(q>0,(q*0.5).exp(),0), torch.where(q<0,(q*-0.5).exp(),0)], dim=-1)
         k = torch.cat([torch.where(k>0,(k*0.5).exp(),0), torch.where(k<0,(k*-0.5).exp(),0)], dim=-1)
+        #q = torch.cat([torch.where(q>0,(q*0.5).exp(),0), torch.where(q<0,(q*-0.5).exp(),0), torch.where(q<0,(q*0.5).exp(),0), torch.where(q>0,(q*-0.5).exp(),0)], dim=-1)
+        #k = torch.cat([torch.where(k>0,(k*0.5).exp(),0), torch.where(k<0,(k*-0.5).exp(),0), torch.where(k>0,(k*-0.5).exp(),0), torch.where(k<0,(k*0.5).exp(),0)], dim=-1)
         #qmax = q.max()
         #kmax = k.max()
         #print(qmax, kmax)
@@ -405,6 +404,9 @@ class TMix_qwen2rwkv(TMix_qwen2):
         #k = torch.cat([torch.where(k>0,torch.softmax(k, dim=-1),0), torch.where(k<0,torch.softmax(-k, dim=-1),0)], dim=-1)
         #q = torch.cat([q.exp().to(v.dtype), (-q).exp().to(v.dtype)], dim=-1)
         #k = torch.cat([k.exp().to(v.dtype), (-k).exp().to(v.dtype)], dim=-1)
+
+        q = q.to(v.dtype)
+        k = k.to(v.dtype)
 
 
         # q = torch.cat([torch.relu(q), torch.relu(-q), torch.relu(q), torch.relu(-q)], dim=-1) # add 2x2 truth table so +,+ and -,- work normally but -,+ and +,- give low (or zero) contribution
