@@ -62,6 +62,7 @@ class train_callback(pl.Callback):
                     exit(0)
 
         if trainer.global_step < config.train.warmup_steps:
+            #lr = lr * (0.2 + 0.8 * trainer.global_step / config.train.warmup_steps)
             lr = lr * (0.01 + .99 * trainer.global_step / config.train.warmup_steps)
 
         if config.train.weight_decay_final > 0:

@@ -18,13 +18,13 @@ train:
   proj_name: qwen2-0B5
   proj_suffix: 1
   train_stage: 3
-  #load_model: out/qwen2-0B5-1/rwkv-init.pth
-  load_model: out/qwen2-0B5.safetensors
-  load_partial: 1
+  load_model: out/qwen2-0B5-1/rwkv-init.pth
+  #load_model: out/qwen2-0B5.safetensors
+  #load_partial: 1
 
   data_type: "binidx" 
-  data_file: "data/minipile" 
-  my_exit_tokens: 20000000 # 1491785955
+  data_file: "data/minipile_qwen2" 
+  my_exit_tokens: 40000000 # 1491785955
   magic_prime: 2913641 # 364193
 
   lr_init: 1e-3

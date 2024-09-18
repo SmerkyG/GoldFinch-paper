@@ -100,7 +100,7 @@ class LightningModelWrapper(pl.LightningModule):
             #    print('', i, float(teacher_results.hidden_states[i].min()), float(teacher_results.hidden_states[i].max()), float(teacher_results.attentions[i].min()), float(teacher_results.attentions[i].max()), float(student_results.attentions[i].min()), float(student_results.attentions[i].max()), )
             #exit(0)
             if stage == 1:
-                reported_loss = training_loss = torch.linalg.matrix_norm(torch.cat(teacher_results.attentions, dim=0) - torch.cat(student_results.attentions, dim=0)).mean()# / teacher_results.attentions[0].size(-1)
+                reported_loss = training_loss = torch.linalg.matrix_norm(torch.cat(teacher_results.attentions, dim=0) - torch.cat(student_results.attentions, dim=0)).mean() / teacher_results.attentions[0].size(-1)
             else: # stage == 2:
                 reported_loss = training_loss = torch.linalg.vector_norm(torch.cat(teacher_results.post_attention_hidden_states, dim=0) - torch.cat(student_results.post_attention_hidden_states, dim=0), dim=-1).mean() * (student_results.post_attention_hidden_states[0].size(-1) ** -0.5)
             logits = torch.tensor([], device=x.device)

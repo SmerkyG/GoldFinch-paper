@@ -24,7 +24,7 @@ train:
   load_partial: 0
 
   data_type: "binidx" 
-  data_file: "data/minipile" 
+  data_file: "data/minipile_qwen2" 
   my_exit_tokens: 1491785955
   magic_prime: 2913641 # 364193
 
