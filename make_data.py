@@ -103,13 +103,15 @@ def is_prime(n):
 
 ########################################################################################################
 
-N_EPOCH = int(sys.argv[2].strip())
-IN_FILE = sys.argv[1].strip()
+ARG1 = sys.argv[1].strip()
+IN_FILE = sys.argv[2].strip()
 OUT_NAME = os.path.splitext(os.path.basename(IN_FILE))[0]
 CTX_LEN = int(sys.argv[3].strip())
 TEMP_FILE = "make_data_temp.jsonl"
 
-if IN_FILE != 'check':
+if ARG1 != 'check':
+    N_EPOCH = int(ARG1)
+
     print(f"### Convert {IN_FILE} to {OUT_NAME}.bin/idx...")
 
     with open(IN_FILE, "r", encoding="utf-8") as file:
