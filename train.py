@@ -287,9 +287,9 @@ if __name__ == "__main__":
             load_dict = load_file(config.train.load_model)
         else:
             load_dict = torch.load(config.train.load_model, map_location="cpu")
-        # FIXME - hacked in weight tying
-        if classname.startswith('qwen2') or config.model.tmix.startswith('qwen2'):
-            load_dict['lm_head.weight'] = load_dict['model.embed_tokens.weight']
+        # # FIXME - hacked in weight tying
+        # if classname.startswith('qwen2') or config.model.tmix.startswith('qwen2'):
+        #     load_dict['lm_head.weight'] = load_dict['model.embed_tokens.weight']
 
         if config.train.load_partial == 1:
             load_keys = load_dict.keys()
