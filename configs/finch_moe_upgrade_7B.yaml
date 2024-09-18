@@ -1,0 +1,47 @@
+model:
+    __type__: configs.Transformer_Config
+    tmix: x060
+    cmix: x060moe
+    num_experts: 8
+    ep_size: 8
+
+    ctx_len: 4096
+    n_layer: 32
+    n_embd: 4096
+    vocab_size: 65536
+
+train:
+    ckpt_path: '/storage/ckpt/rwkv-6371.pth'
+    load_partial: 1
+
+    wandb: "finch-moe-upgrade"
+    proj_suffix: "upgrade"
+    train_stage: 3 
+    data_type: "binidx" 
+    data_file: "/storage/data/ProMix2/dataset_chunk_0_text_document" 
+    validation_data_file: "/storage/data/minipile_validation/minipile_validation" 
+    val_check_interval: 1.0
+    my_exit_tokens: 109126318562
+    magic_prime: 26642159
+   
+    save_every_n_epochs: 1
+    
+    lr_decay_type: oneminussqrt
+    lr_wait: 0.8
+    lr_init: 1e-5
+    lr_final: 0
+    lr2_init: 1e-4
+    lr2_final: 0
+    warmup_steps: 10 
+    beta1: 0.95 
+    beta2: 0.99 
+    adam_eps: 1e-8 
+    weight_decay: 0.1 
+
+    devices: 8
+    num_nodes: 1
+    micro_bsz: 14
+    accumulate_grad_batches: 1
+    strategy: deepspeed_stage_2 
+    grad_cp: 1
+    ds_bucket_mb: 200 # set to 2 for consumer GPUs, set to 200 for A100 / H100 (affects speed & vram usage)

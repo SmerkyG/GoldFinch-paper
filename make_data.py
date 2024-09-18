@@ -140,7 +140,7 @@ if ARG1 != 'check':
     builder.finalize((f"{OUT_NAME}.idx"))
     print("done")
 
-print("### Verifying result...")
+print("### Verifying result for {OUT_NAME}.bin/idx...")
 data = MMapIndexedDataset(OUT_NAME)
 data_len = len(data)
 data_size = len(data._bin_buffer) // data._index._dtype_size
