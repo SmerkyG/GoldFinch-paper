@@ -24,9 +24,9 @@ train:
   load_partial: 0
 
   data_type: "binidx" 
-  data_file: "data/dclm-10B" #"data/minipile_qwen2" 
-  my_exit_tokens: 1500000000 #1491785955
-  magic_prime: 2929793 # 2913641 # 364193
+  data_file: "data/minipile" 
+  my_exit_tokens: 1491785955
+  magic_prime: 2913641 # 364193
 
   lr_wait: 0.8
   lr_decay_type: oneminussqrt
