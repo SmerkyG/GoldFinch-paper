@@ -142,9 +142,7 @@ class LightningModelWrapper(pl.LightningModule):
                 log_target=True,
                 reduction='batchmean'
             )
-            training_loss = distillation_loss * self.config.train.teacher.kl_weight
-            if self.config.train.teacher.ce_weight > 0:
-                training_loss = training_loss + reported_loss * self.config.train.teacher.ce_weight
+            training_loss = distillation_loss * self.config.train.teacher.kl_weight + training_loss * self.config.train.teacher.ce_weight
 
         if training_loss.isinf().any():
             raise Exception("loss was infinite")
@@ -197,10 +195,10 @@ class LightningModelWrapper(pl.LightningModule):
                     if len(self.config.train.wandb) > 0:
                         self.trainer.my_wandb.log(logdict, step=self.get_real_global_step(), commit=True)
 
-        #if logits.size(0) > 0:
-        #    return L2Wrap.apply(training_loss, logits)
-        #else:
-        return training_loss
+        if logits.size(0) > 0:
+            return L2Wrap.apply(training_loss, logits)
+        else:
+            return training_loss
 
     def on_validation_epoch_start(self):
         if self.trainer.is_global_zero:
