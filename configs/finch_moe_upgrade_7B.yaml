@@ -16,7 +16,7 @@ train:
 
     wandb: "finch-moe-upgrade"
     proj_suffix: "upgrade"
-    train_stage: 3 
+
     data_type: "binidx" 
     data_file: "/storage/data/ProMix2/dataset_chunk_0_text_document" 
     validation_data_file: "/storage/data/minipile_validation/minipile_validation" 
