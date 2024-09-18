@@ -38,10 +38,10 @@ train:
   adam_eps: 1e-8 
   weight_decay: 0.1 
 
-  devices: 4
+  devices: 8
   num_nodes: 1
   micro_bsz: 12
-  accumulate_grad_batches: 2 # 96 total bsz
+  accumulate_grad_batches: 1 # 96 total bsz
   strategy: deepspeed_stage_1
   grad_cp: 1
   ds_bucket_mb: 2 # set to 2 for consumer GPUs, set to 200 for A100 / H100 (affects speed & vram usage)
