@@ -245,9 +245,9 @@ if __name__ == "__main__":
             model = Qwen2ForCausalLM(Qwen2Config(rwkv='rwkv' in config.model.tmix, **qwen_cfg), config)
         else:
             model = Transformer(config)
-        # FIXME - hacked in weight tying
-        if classname.startswith('qwen2') or config.model.tmix.startswith('qwen2'):
-            model.lm_head.weight = model.model.embed_tokens.weight
+        # # FIXME - hacked in weight tying [this messed everything up!]
+        # if classname.startswith('qwen2') or config.model.tmix.startswith('qwen2'):
+        #     model.lm_head.weight = model.model.embed_tokens.weight
                             
     if config.train.train_stage == 1:  # should we build the initial weights?
         init_weight_name = f"{config.runtime.proj_path}/rwkv-init.pth"
@@ -287,6 +287,10 @@ if __name__ == "__main__":
             #mm = model.init_weights() # already done in the constructor
 
     if config.train.train_stage >= 2 and config.train.load_model != '':
+        # FIXME - hacked in weight tying
+        if classname.startswith('qwen2') or config.model.tmix.startswith('qwen2'):
+            load_dict['lm_head.weight'] = load_dict['model.embed_tokens.weight']
+
         if config.train.load_partial == 1:
             load_keys = load_dict.keys()
             for k in model.state_dict():
