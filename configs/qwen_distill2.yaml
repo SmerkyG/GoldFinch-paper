@@ -36,9 +36,9 @@ train:
   adam_eps: 1e-8 
   weight_decay: 0.1 
 
-  devices: 4
+  devices: 8
   num_nodes: 1
-  micro_bsz: 8
+  micro_bsz: 4
   accumulate_grad_batches: 1 # total bsz 32
   strategy: deepspeed_stage_1
   grad_cp: 0

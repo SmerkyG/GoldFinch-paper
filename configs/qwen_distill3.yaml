@@ -31,7 +31,7 @@ train:
   lr_wait: 0.8
   lr_decay_type: oneminussqrt
   lr_init: 1e-5
-  lr_final: 1e-8
+  lr_final: 1e-7
   warmup_steps: 50 
   beta1: 0.9 
   beta2: 0.95 

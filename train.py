@@ -208,8 +208,12 @@ if __name__ == "__main__":
     if config.train.train_stage > 1:
         teacher_config = config.train.teacher
         if teacher_config is not None and teacher_config.path != '':
-            classname = teacher_config.model.classname
+            if teacher_config.path.lower().endswith('.safetensors'):
+                load_dict = load_file(teacher_config.path)
+            else:
+                load_dict = torch.load(teacher_config.path, map_location="cpu")
             with trainer.init_module(empty_init=True):
+                classname = teacher_config.model.classname
                 if classname != '':
                     teacher_classpath = f'models.{classname}.Model_{classname}'
                     teacher_factory = locate(teacher_classpath)
@@ -217,22 +221,13 @@ if __name__ == "__main__":
                         print(f"Unsupported teacher model type: {teacher_classpath}")
                         exit(0)
                     teacher = teacher_factory(teacher_config)
+                    if classname.startswith('qwen2'):
+                        load_dict['lm_head.weight'] = load_dict['model.embed_tokens.weight']
                 elif teacher_config.model.tmix.startswith('qwen2'):
                     teacher = Qwen2ForCausalLM(Qwen2Config(rwkv='rwkv' in teacher_config.model.tmix, **qwen_cfg), teacher_config)
+                    load_dict['lm_head.weight'] = load_dict['model.embed_tokens.weight']
                 else:
                     teacher = Transformer(teacher_config)
-            # FIXME - hacked in weight tying
-            if classname.startswith('qwen2') or config.model.tmix.startswith('qwen2'):
-                teacher.lm_head.weight = teacher.model.embed_tokens.weight
-            teacher = teacher.to(torch.bfloat16) # NOTE - doing this here because otherwise it doesn't get done when not using deepspeed
-
-            if teacher_config.path.lower().endswith('.safetensors'):
-                load_dict = load_file(teacher_config.path)
-            else:
-                load_dict = torch.load(teacher_config.path, map_location="cpu")
-            # FIXME - hacked in weight tying
-            if classname.startswith('qwen2') or config.model.tmix.startswith('qwen2'):
-                load_dict['lm_head.weight'] = load_dict['model.embed_tokens.weight']
             teacher.load_state_dict(load_dict)
             teacher.eval()
             teacher.requires_grad_(False)
@@ -250,9 +245,6 @@ if __name__ == "__main__":
             model = Qwen2ForCausalLM(Qwen2Config(rwkv='rwkv' in config.model.tmix, **qwen_cfg), config)
         else:
             model = Transformer(config)
-        # FIXME - hacked in weight tying
-        if classname.startswith('qwen2') or config.model.tmix.startswith('qwen2'):
-            model.lm_head.weight = model.model.embed_tokens.weight
                 
     if config.train.train_stage == 1:  # should we build the initial weights?
         init_weight_name = f"{config.runtime.proj_path}/rwkv-init.pth"
@@ -271,6 +263,16 @@ if __name__ == "__main__":
         print("Done. Now go for stage 2.")
         exit(0)
 
+    if config.train.train_stage >= 2:
+        rank_zero_info(f"########## Loading {config.train.load_model}... ##########")
+        if config.train.load_model.lower().endswith('.safetensors'):
+            load_dict = load_file(config.train.load_model)
+            if classname.startswith('qwen2') or config.model.tmix.startswith('qwen2'):
+                load_dict['lm_head.weight'] = load_dict['model.embed_tokens.weight']
+            load_dict['lm_head.weight'] = load_dict['model.embed_tokens.weight']
+        else:
+            load_dict = torch.load(config.train.load_model, map_location="cpu")
+
     if config.train.train_stage == 0 or config.train.load_partial == 1:
         if classname != '':
             model.apply(model._init_weights)
@@ -281,30 +283,13 @@ if __name__ == "__main__":
         #else:
             #mm = model.init_weights() # already done in the constructor
 
-    if config.train.load_model != '':#config.train.train_stage >= 2:
-        rank_zero_info(f"########## Loading {config.train.load_model}... ##########")
-        if config.train.load_model.lower().endswith('.safetensors'):
-            load_dict = load_file(config.train.load_model)
-        else:
-            load_dict = torch.load(config.train.load_model, map_location="cpu")
-        # # FIXME - hacked in weight tying
-        # if classname.startswith('qwen2') or config.model.tmix.startswith('qwen2'):
-        #     load_dict['lm_head.weight'] = load_dict['model.embed_tokens.weight']
-
+    if config.train.train_stage >= 2 and config.train.load_model != '':
         if config.train.load_partial == 1:
             load_keys = load_dict.keys()
             for k in model.state_dict():
                 if k not in load_keys:
                     load_dict[k] = model.state_dict()[k]
         model.load_state_dict(load_dict, strict = not config.train.load_partial)
-
-    if config.train.train_stage == -1:
-        init_weight_name = f"{config.runtime.proj_path}/rwkv-init.pth"
-        mm = {k: v.cpu() for k, v in model.state_dict().items()} #model.state_dict()
-        print(f"Save to {init_weight_name}...")
-        torch.save(mm, init_weight_name)
-        print("Done. Now go for stage 2.")
-        exit(0)
 
     if trainer.global_rank == 0:
         for n in model.state_dict():
