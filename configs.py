@@ -4,6 +4,8 @@ import typing
 
 @dataclass(kw_only=True)
 class Model_Config:
+    hf_cfg:typing.Any = None
+
     classname: str = ''
     tmix: str = 'x060'
     tmix2: str = ''
