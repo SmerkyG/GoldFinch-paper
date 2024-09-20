@@ -590,11 +590,11 @@ class Model_qwen2(nn.Module): # Qwen2CausalLM
             self.model.norm.requires_grad_(False)
             self.lm_head.requires_grad_(False)
 
-        # # FIXME - remove these for full training
-        # for decoder_layer in self.model.layers:
-        #     decoder_layer.post_attention_layernorm.requires_grad_(False)
-        #     for p in decoder_layer.mlp.parameters():
-        #         decoder_layer.mlp.requires_grad_(False)
+        # FIXME - remove these for full training
+        for decoder_layer in self.model.layers:
+            decoder_layer.post_attention_layernorm.requires_grad_(False)
+            for p in decoder_layer.mlp.parameters():
+                decoder_layer.mlp.requires_grad_(False)
         # self.model.embed_tokens.requires_grad_(False)
         # self.model.norm.requires_grad_(False)
         # self.lm_head.requires_grad_(False)
@@ -610,9 +610,10 @@ class Model_qwen2(nn.Module): # Qwen2CausalLM
         for n, p in self.named_parameters():
             if not p.requires_grad:
                 continue
-            if 'lm_head.weight' in n:
-                lr_tiny.add(n)
-            elif (len(p.squeeze().shape) >= 2) and (train_config.weight_decay > 0):
+            #if 'lm_head.weight' in n:
+            #    lr_tiny.add(n)
+            #el
+            if (len(p.squeeze().shape) >= 2) and (train_config.weight_decay > 0):
                 lr_decay.add(n)
             else:
                 lr_1x.add(n)
