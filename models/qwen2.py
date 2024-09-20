@@ -610,7 +610,7 @@ class Model_qwen2(nn.Module): # Qwen2CausalLM
         for n, p in self.named_parameters():
             if not p.requires_grad:
                 continue
-            if '.lm_head.weight' in n:
+            if 'lm_head.weight' in n:
                 lr_tiny.add(n)
             elif (len(p.squeeze().shape) >= 2) and (train_config.weight_decay > 0):
                 lr_decay.add(n)
