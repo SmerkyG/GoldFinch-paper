@@ -28,6 +28,8 @@ from src.pipeline import PIPELINE, PIPELINE_ARGS
 from lm_eval import tasks, evaluator, utils
 from lm_eval.api.model import TemplateLM
 
+import tqdm
+
 ########################################################################################################
 
 from dataclasses import dataclass
@@ -36,7 +38,7 @@ import typing
 @dataclass(kw_only=True)
 class CLI_Config:
     path: str
-    tasks: str = 'lambada_openai'
+    tasks: str = 'lambada_openai' # arc_challenge, arc_easy, headqa, openbookqa, hellaswag, winogrande, piqa, record, copa, storycloze_2016
     bsz: int = 48
     precision: int | str = 'bf16'
     seed: int | None = None
