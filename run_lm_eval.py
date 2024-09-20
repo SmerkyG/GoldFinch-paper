@@ -154,12 +154,21 @@ class EvalHarnessAdapter(TemplateLM):
         all_tokens = []
         out_last = 0
         out_str = ''
-        for i in range(self.max_new_tokens):
+        for i in range(self.max_gen_toks):
             tokens = self.tokenizer.encode(ctx) if i == 0 else [token]
             while len(tokens) > 0:
-                out, state = model.forward(tokens[:self.max_length], state)
+                results = model.forward(tokens[:self.max_length], state)
+                if isinstance(results, tuple):
+                    logits = results[0]
+                    #next_model_state = results[1]
+                elif isinstance(results, torch.Tensor):
+                    logits = results
+                    #next_model_state = last_model_state
+                else:
+                    logits = results.logits
+                    #next_model_state = last_model_state
                 tokens = tokens[self.max_length:]
-            token = out.argmax().item()
+            token = logits.argmax().item()
             if token in STOP_TOKEN:
                 break
             all_tokens += [token]
