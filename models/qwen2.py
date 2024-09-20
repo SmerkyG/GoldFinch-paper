@@ -590,11 +590,11 @@ class Model_qwen2(nn.Module): # Qwen2CausalLM
             self.model.norm.requires_grad_(False)
             self.lm_head.requires_grad_(False)
 
-        # FIXME - remove these for full training
-        for decoder_layer in self.model.layers:
-            decoder_layer.post_attention_layernorm.requires_grad_(False)
-            for p in decoder_layer.mlp.parameters():
-                decoder_layer.mlp.requires_grad_(False)
+        # # FIXME - remove these for full training
+        # for decoder_layer in self.model.layers:
+        #     decoder_layer.post_attention_layernorm.requires_grad_(False)
+        #     for p in decoder_layer.mlp.parameters():
+        #         decoder_layer.mlp.requires_grad_(False)
         self.model.embed_tokens.requires_grad_(False)
         self.model.norm.requires_grad_(False)
         self.lm_head.requires_grad_(False)
