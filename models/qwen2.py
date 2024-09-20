@@ -597,7 +597,7 @@ class Model_qwen2(nn.Module): # Qwen2CausalLM
         #         decoder_layer.mlp.requires_grad_(False)
         # self.model.embed_tokens.requires_grad_(False)
         # self.model.norm.requires_grad_(False)
-        self.lm_head.requires_grad_(False)
+        # self.lm_head.requires_grad_(False)
 
         # JIT at last minute
         for decoder_layer in self.model.layers:
@@ -606,29 +606,36 @@ class Model_qwen2(nn.Module): # Qwen2CausalLM
 
         lr_decay = set()
         lr_1x = set()
+        lr_tiny = set()
         for n, p in self.named_parameters():
             if not p.requires_grad:
                 continue
-            if (len(p.squeeze().shape) >= 2) and (train_config.weight_decay > 0):
+            if '.lm_head.weight' in n:
+                lr_tiny.add(n)
+            elif (len(p.squeeze().shape) >= 2) and (train_config.weight_decay > 0):
                 lr_decay.add(n)
             else:
                 lr_1x.add(n)
 
         param_dict = {n: p for n, p in self.named_parameters()}
-        param_check = list(lr_decay) + list(lr_1x)
+        param_check = list(lr_decay) + list(lr_1x) + list(lr_tiny)
         #if not train_config.load_partial and (train_config.teacher is None or train_config.teacher.attention_distillation_stage ==3):
         #    assert sorted(param_dict) == sorted(param_check)
 
         lr_decay = sorted(list(lr_decay))
         lr_1x = sorted(list(lr_1x))
+        lr_tiny = sorted(list(lr_tiny))
         
         print('decay', lr_decay, '\n')
         print('1x', lr_1x, '\n')
+        print('tiny', lr_tiny, '\n')
 
         
         optim_groups = [
             {"params": [param_dict[n] for n in lr_1x], "weight_decay": 0.0, "my_lr_scale": 1.0, 'name':'lr_1x'},
         ]
+        if len(lr_tiny) > 0:
+            optim_groups += [{"params": [param_dict[n] for n in lr_tiny], "weight_decay": train_config.weight_decay, "my_lr_scale": 0.01, 'name':'lr_tiny'}]
         if len(lr_decay) > 0:
             optim_groups += [{"params": [param_dict[n] for n in lr_decay], "weight_decay": train_config.weight_decay, "my_lr_scale": 1.0, 'name':'lr_decay'}]
 
