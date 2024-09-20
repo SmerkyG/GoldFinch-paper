@@ -28,7 +28,7 @@ from src.pipeline import PIPELINE, PIPELINE_ARGS
 from lm_eval import tasks, evaluator, utils
 from lm_eval.api.model import TemplateLM
 
-import tqdm
+from tqdm import tqdm
 
 ########################################################################################################
 
@@ -108,11 +108,13 @@ pipeline = PIPELINE(model, "rwkv_vocab_v20230424")
 eval_tasks = config.tasks.split(',')
 
 RWKV_PAD = pipeline.tokenizer.encode('\n') # we will use '\n' as PAD
+#STOP_TOKEN = RWKV_PAD + pipeline.tokenizer.encode('\n\n') # we will use '\n\n' as STOP
 # RWKV_PAD = [0] # you can try using [0] as pad
 
 RWKV_PAD = -1 # means do not pad
 
 print('RWKV_PAD', RWKV_PAD)
+#print('STOP_TOKEN', STOP_TOKEN)
 
 ########################################################################################################
 
@@ -122,7 +124,8 @@ correctBuf = {}
 class TokenizerWrapper:
     def __init__(self, tokenizer):
         self.tokenizer = tokenizer
-        self.eos_token_id = 0
+        #self.eos_token_id = 0
+        self.eos_token_id = tokenizer.eos_token_id
 
     def encode(self, string: str, add_special_tokens=False):
         return self.tokenizer.encode(string)
@@ -143,6 +146,28 @@ class EvalHarnessAdapter(TemplateLM):
         raise NotImplementedError(
             "`loglikelihood_rolling` is currently not supported"
         )
+    
+    @torch.no_grad()
+    def greedy_generate(self, ctx, state=None):
+        STOP_TOKEN = self.tokenizer.eos_token_id
+
+        all_tokens = []
+        out_last = 0
+        out_str = ''
+        for i in range(self.max_new_tokens):
+            tokens = self.tokenizer.encode(ctx) if i == 0 else [token]
+            while len(tokens) > 0:
+                out, state = model.forward(tokens[:self.max_length], state)
+                tokens = tokens[self.max_length:]
+            token = out.argmax().item()
+            if token in STOP_TOKEN:
+                break
+            all_tokens += [token]
+            tmp = self.tokenizer.decode(all_tokens[out_last:])
+            if '\ufffd' not in tmp: # is valid utf-8 string?
+                out_str += tmp
+                out_last = i + 1
+        return out_str
     
     @torch.no_grad()
     def generate_until(self, requests):
