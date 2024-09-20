@@ -149,7 +149,7 @@ class EvalHarnessAdapter(TemplateLM):
     
     @torch.no_grad()
     def greedy_generate(self, ctx, state=None):
-        STOP_TOKEN = self.tokenizer.eos_token_id
+        STOP_TOKEN = [self.tokenizer.eos_token_id]
 
         all_tokens = []
         out_last = 0
