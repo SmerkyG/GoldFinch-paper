@@ -511,7 +511,7 @@ class Qwen2Decoder(nn.Module):
         else:
             B = 1
             T = len(token_ids)
-            token_ids = torch.tensor(token_ids, device=self.emb.weight.device, dtype=torch.long, requires_grad=False)[None, :]
+            token_ids = torch.tensor(token_ids, device=self.embed_tokens.weight.device, dtype=torch.long, requires_grad=False)[None, :]
 
         x = self.embed_tokens(token_ids)
 
