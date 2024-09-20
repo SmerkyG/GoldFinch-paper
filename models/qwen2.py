@@ -596,8 +596,8 @@ class Model_qwen2(nn.Module): # Qwen2CausalLM
         #     for p in decoder_layer.mlp.parameters():
         #         decoder_layer.mlp.requires_grad_(False)
         # self.model.embed_tokens.requires_grad_(False)
-        self.model.norm.requires_grad_(False)
-        # self.lm_head.requires_grad_(False)
+        # self.model.norm.requires_grad_(False)
+        self.lm_head.requires_grad_(False)
 
         # JIT at last minute
         for decoder_layer in self.model.layers:

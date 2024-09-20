@@ -298,9 +298,9 @@ if __name__ == "__main__":
                     load_dict[k] = model.state_dict()[k]
         model.load_state_dict(load_dict, strict = not config.train.load_partial)
 
-        # FIXME - hacked in weight tying [trying this new approach]
-        if classname.startswith('qwen2') or config.model.tmix.startswith('qwen2'):
-            model.lm_head.weight = model.model.embed_tokens.weight
+        # # FIXME - hacked in weight tying [trying this new approach]
+        # if classname.startswith('qwen2') or config.model.tmix.startswith('qwen2'):
+        #     model.lm_head.weight = model.model.embed_tokens.weight
 
     if trainer.global_rank == 0:
         for n in model.state_dict():
