@@ -271,7 +271,7 @@ if __name__ == "__main__":
         rank_zero_info(f"########## Loading {config.train.load_model}... ##########")
         if config.train.load_model.lower().endswith('.safetensors'):
             load_dict = load_file(config.train.load_model)
-            if classname.startswith('qwen2') or config.model.tmix.startswith('qwen2') and config.model.n_embd < 3584:
+            if (classname.startswith('qwen2') or config.model.tmix.startswith('qwen2')) and config.model.n_embd < 3584:
                 load_dict['lm_head.weight'] = load_dict['model.embed_tokens.weight']
             load_dict['lm_head.weight'] = load_dict['model.embed_tokens.weight']
         else:
