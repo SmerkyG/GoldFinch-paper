@@ -221,11 +221,11 @@ if __name__ == "__main__":
                         print(f"Unsupported teacher model type: {teacher_classpath}")
                         exit(0)
                     teacher = teacher_factory(teacher_config)
-                    if classname.startswith('qwen2') and teacher_config.model.n_embd >= 3584:
+                    if classname.startswith('qwen2') and teacher_config.model.n_embd < 3584:
                         load_dict['lm_head.weight'] = load_dict['model.embed_tokens.weight']
                 elif teacher_config.model.tmix.startswith('qwen2'):
                     teacher = Qwen2ForCausalLM(Qwen2Config(rwkv='rwkv' in teacher_config.model.tmix, **qwen_cfg), teacher_config)
-                    if teacher_config.model.n_embd >= 3584:
+                    if teacher_config.model.n_embd < 3584:
                         load_dict['lm_head.weight'] = load_dict['model.embed_tokens.weight']
                 else:
                     teacher = Transformer(teacher_config)
@@ -247,7 +247,7 @@ if __name__ == "__main__":
         else:
             model = Transformer(config)
         # # FIXME - hacked in weight tying [this messed everything up!]
-        # if (classname.startswith('qwen2') or config.model.tmix.startswith('qwen2')) and config.model.n_embd >= 3584:
+        # if (classname.startswith('qwen2') or config.model.tmix.startswith('qwen2')) and config.model.n_embd < 3584:
         #     model.lm_head.weight = model.model.embed_tokens.weight
                             
     if config.train.train_stage == 1:  # should we build the initial weights?
@@ -271,7 +271,7 @@ if __name__ == "__main__":
         rank_zero_info(f"########## Loading {config.train.load_model}... ##########")
         if config.train.load_model.lower().endswith('.safetensors'):
             load_dict = load_file(config.train.load_model)
-            if classname.startswith('qwen2') or config.model.tmix.startswith('qwen2') and config.model.n_embd >= 3584:
+            if classname.startswith('qwen2') or config.model.tmix.startswith('qwen2') and config.model.n_embd < 3584:
                 load_dict['lm_head.weight'] = load_dict['model.embed_tokens.weight']
             load_dict['lm_head.weight'] = load_dict['model.embed_tokens.weight']
         else:
@@ -287,7 +287,7 @@ if __name__ == "__main__":
         #else:
             #mm = model.init_weights() # already done in the constructor
 
-    if config.train.train_stage >= 2 and config.train.load_model != '' and config.model.n_embd >= 3584:
+    if config.train.train_stage >= 2 and config.train.load_model != '' and config.model.n_embd < 3584:
         # FIXME - hacked in weight tying
         if classname.startswith('qwen2') or config.model.tmix.startswith('qwen2'):
             load_dict['lm_head.weight'] = load_dict['model.embed_tokens.weight']
@@ -300,7 +300,7 @@ if __name__ == "__main__":
         model.load_state_dict(load_dict, strict = not config.train.load_partial)
 
         # # FIXME - hacked in weight tying [trying this new approach]
-        # if (classname.startswith('qwen2') or config.model.tmix.startswith('qwen2')) and config.model.n_embd >= 3584:
+        # if (classname.startswith('qwen2') or config.model.tmix.startswith('qwen2')) and config.model.n_embd < 3584:
         #     model.lm_head.weight = model.model.embed_tokens.weight
 
     if trainer.global_rank == 0:
