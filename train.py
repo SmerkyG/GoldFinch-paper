@@ -273,7 +273,6 @@ if __name__ == "__main__":
             load_dict = load_file(config.train.load_model)
             if (classname.startswith('qwen2') or config.model.tmix.startswith('qwen2')) and config.model.n_embd < 3584:
                 load_dict['lm_head.weight'] = load_dict['model.embed_tokens.weight']
-            load_dict['lm_head.weight'] = load_dict['model.embed_tokens.weight']
         else:
             load_dict = torch.load(config.train.load_model, map_location="cpu")
 
@@ -287,9 +286,9 @@ if __name__ == "__main__":
         #else:
             #mm = model.init_weights() # already done in the constructor
 
-    if config.train.train_stage >= 2 and config.train.load_model != '' and config.model.n_embd < 3584:
+    if config.train.train_stage >= 2 and config.train.load_model != '':
         # FIXME - hacked in weight tying
-        if classname.startswith('qwen2') or config.model.tmix.startswith('qwen2'):
+        if (classname.startswith('qwen2') or config.model.tmix.startswith('qwen2')) and config.model.n_embd < 3584:
             load_dict['lm_head.weight'] = load_dict['model.embed_tokens.weight']
 
         if config.train.load_partial == 1:
