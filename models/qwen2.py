@@ -77,8 +77,10 @@ def fla_fused_chunk_gla(
     g = g.float()
     initial_state = None
     output_final_state = False
+    seq_len = q.shape[-2]
     q, k, v, g = pad(q), pad(k), pad(v), pad(g)
     o, final_state = FusedChunkGLAFunction.apply(q, k, v, g, scale, initial_state, output_final_state)
+    o = o[..., :seq_len, :]
     return o, final_state
 
 
