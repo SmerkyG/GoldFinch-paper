@@ -229,24 +229,6 @@ class TMix_qwen2(nn.Module):
         y = self.o_proj(y)
         return y, TimeMixState(wkv_state, last_state.shift_state), attn_weights
 
-def dotexp(x_abslog, x_sign, y_abslog, y_sign):
-  xy_abslog = x_abslog + y_abslog # in log space, so this is really multiplication
-  xy_sign = x_sign ^ y_sign # also multiplication, of signs
-  xy = xy_abslog.exp() * (1 - 2 * xy_sign)
-  dot_xy = xy.sum(-1)
-  return dot_xy
-
-def abslog_sign(x):
-  return x.abs().log(), x<0
-
-def channel_decayed_linear_attention(q, k, w_cumsum_log):
-  x_abslog, x_sign = abslog_sign(q)
-  x_abslog = x_abslog + w_cumsum_log # in log space, so this is really multiplication
-  y_abslog, y_sign = abslog_sign(k)
-  y_abslog = y_abslog - w_cumsum_log # in log space, so this is really division
-  attn_scores = dotexp(x_abslog[..., :, None, :], x_sign[..., :, None, :], y_abslog[..., None, :, :], y_sign[..., None, :, :])
-  return attn_scores
-
 class TMix_qwen2rwkv(TMix_qwen2):
     """
     Qwen2 RWKV-6cSimple attention module, following Qwen2 attention module. This module inherits from `Qwen2Attention`
@@ -396,17 +378,16 @@ class TMix_qwen2rwkv(TMix_qwen2):
             attn_weights = torch.empty(0, device=x.device)
 
             #attn_output = fla_chunk_simple_gla(query_states, key_states, value_states, decay_states_log.view(bsz, self.num_heads, q_len))[0]
-            attn_output = fla_chunk_gla(query_states, key_states, value_states, decay_states_log.view(bsz, self.num_heads, q_len))[0]
+            attn_output = fla_chunk_gla(query_states, key_states, value_states, decay_states_log)[0]
             attn_output = attn_output.transpose(1, 2).contiguous()
             attn_output = attn_output.view(bsz, q_len, self.hidden_size)
             attn_output = self.ln_x(attn_output)
             attn_output = self.o_proj(attn_output)
         else:
             attn_weights = (query_states * (key_states.size(-1) ** -0.5)) @ key_states.mT
-            #attn_weights = attn_weights.float() * self.segsum(decay_states_log.float()) # NOTE - without the explicit cast to float ddp mismatched deepspeed here
 
-            w_cumsum_log = decay_states_log.cumsum(dim=-2)
-            attn_weights = attn_weights.float() * channel_decayed_linear_attention(query_states, key_states, w_cumsum_log)
+            decay_states_log = decay_states_log.mean(-1, keepdim=True)
+            attn_weights = attn_weights.float() * self.segsum(decay_states_log.float()) # NOTE - without the explicit cast to float ddp mismatched deepspeed here
 
             attn_weights = attn_weights.to(query_states.dtype)
             attn_output = torch.empty(0, device=x.device)
