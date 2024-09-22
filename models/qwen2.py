@@ -368,8 +368,8 @@ class TMix_qwen2rwkv(TMix_qwen2):
         # kv_seq_len = key_states.shape[-2]
         # cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
         # query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)#, position_ids)
-        cos, sin = shared.angles.unbind(0)
-        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
+        #cos, sin = shared.angles.unbind(0)
+        #query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
         query_states = query_states.to(value_states.dtype)
         key_states = key_states.to(value_states.dtype)
 
