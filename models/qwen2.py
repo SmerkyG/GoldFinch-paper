@@ -40,6 +40,21 @@ def fla_chunk_simple_gla(
     o, final_state = SimpleGLAFunction.apply(q, k, v, g, scale, initial_state, output_final_state, checkpoint_level)
     return o, final_state
 
+from fla.ops.gla.chunk import chunk_gla, ChunkGLAFunction
+
+def fla_chunk_gla(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g: torch.Tensor,  # log decay
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    scale = q.shape[-1] ** -0.5
+    #g = g.float()
+    initial_state = None
+    output_final_state = False
+    o, final_state = ChunkGLAFunction.apply(q, k, v, g, scale, initial_state, output_final_state)
+    return o, final_state
+
 
 # Copied from transformers.models.llama.modeling_llama.LlamaRMSNorm with Llama->Qwen2
 class Qwen2RMSNorm(nn.Module):
@@ -214,6 +229,24 @@ class TMix_qwen2(nn.Module):
         y = self.o_proj(y)
         return y, TimeMixState(wkv_state, last_state.shift_state), attn_weights
 
+def dotexp(x_abslog, x_sign, y_abslog, y_sign):
+  xy_abslog = x_abslog + y_abslog # in log space, so this is really multiplication
+  xy_sign = x_sign ^ y_sign # also multiplication, of signs
+  xy = xy_abslog.exp() * (1 - 2 * xy_sign)
+  dot_xy = xy.sum(-1)
+  return dot_xy
+
+def abslog_sign(x):
+  return x.abs().log(), x<0
+
+def channel_decayed_linear_attention(q, k, w_cumsum_log):
+  x_abslog, x_sign = abslog_sign(q)
+  x_abslog = x_abslog + w_cumsum_log # in log space, so this is really multiplication
+  y_abslog, y_sign = abslog_sign(k)
+  y_abslog = y_abslog - w_cumsum_log # in log space, so this is really division
+  attn_scores = dotexp(x_abslog[..., :, None, :], x_sign[..., :, None, :], y_abslog[..., None, :, :], y_sign[..., None, :, :])
+  return attn_scores
+
 class TMix_qwen2rwkv(TMix_qwen2):
     """
     Qwen2 RWKV-6cSimple attention module, following Qwen2 attention module. This module inherits from `Qwen2Attention`
@@ -252,26 +285,26 @@ class TMix_qwen2rwkv(TMix_qwen2):
             self.time_maa_w2 = nn.Parameter(torch.zeros(4, D_MIX_LORA, n_embd).uniform_(-0.01, 0.01))
             self.time_maa_w1 = nn.Parameter(torch.zeros(n_embd, D_MIX_LORA*self.time_maa_w2.size(0)))
 
-            # per-head RWKV-6
-            H = self.num_heads
-            # fancy time_decay
-            decay_speed = torch.ones(H)
-            for h in range(H):
-                decay_speed[h] = -6 + 5 * (h / max(H - 1, 1)) ** (0.7 + 1.3 * ratio_0_to_1)
-            self.time_decay = nn.Parameter(decay_speed)
-            #self.time_decay = nn.Parameter(torch.empty(H)).uniform_(-8, -7)
-            D_DECAY_LORA = 64 if n_embd < 4096 else 128
-            self.time_decay_w1 = nn.Parameter(torch.zeros(n_embd, D_DECAY_LORA))
-            self.time_decay_w2 = nn.Parameter(torch.zeros(D_DECAY_LORA, H).uniform_(-0.01, 0.01))
-
-            # # RWKV-6
-            # decay_speed = torch.ones(dim_att)
-            # for n in range(dim_att):
-            #     decay_speed[n] = -6 + 5 * (n / (dim_att - 1)) ** (0.7 + 1.3 * ratio_0_to_1)
-            # self.time_decay = nn.Parameter(decay_speed.reshape(1,1,dim_att))
+            # # per-head RWKV-6
+            # H = self.num_heads
+            # # fancy time_decay
+            # decay_speed = torch.ones(H)
+            # for h in range(H):
+            #     decay_speed[h] = -6 + 5 * (h / max(H - 1, 1)) ** (0.7 + 1.3 * ratio_0_to_1)
+            # self.time_decay = nn.Parameter(decay_speed)
+            # #self.time_decay = nn.Parameter(torch.empty(H)).uniform_(-8, -7)
             # D_DECAY_LORA = 64 if n_embd < 4096 else 128
             # self.time_decay_w1 = nn.Parameter(torch.zeros(n_embd, D_DECAY_LORA))
-            # self.time_decay_w2 = nn.Parameter(torch.zeros(D_DECAY_LORA, dim_att).uniform_(-0.01, 0.01))
+            # self.time_decay_w2 = nn.Parameter(torch.zeros(D_DECAY_LORA, H).uniform_(-0.01, 0.01))
+
+            # RWKV-6
+            decay_speed = torch.ones(dim_att)
+            for n in range(dim_att):
+                decay_speed[n] = -6 + 5 * (n / (dim_att - 1)) ** (0.7 + 1.3 * ratio_0_to_1)
+            self.time_decay = nn.Parameter(decay_speed.reshape(1,1,dim_att))
+            D_DECAY_LORA = 64 if n_embd < 4096 else 128
+            self.time_decay_w1 = nn.Parameter(torch.zeros(n_embd, D_DECAY_LORA))
+            self.time_decay_w2 = nn.Parameter(torch.zeros(D_DECAY_LORA, dim_att).uniform_(-0.01, 0.01))
             # tmp = torch.zeros(dim_att)
             # for n in range(dim_att):
             #     zigzag = ((n + 1) % 3 - 1) * 0.1
@@ -311,7 +344,7 @@ class TMix_qwen2rwkv(TMix_qwen2):
         query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
         key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
         value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
-        decay_states = decay_states.view(bsz, q_len, self.num_heads, 1).transpose(1, 2)
+        decay_states = decay_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
 
         # repeat k/v heads if n_kv_heads < n_heads
         key_states = repeat_kv(key_states, self.num_key_value_groups)
@@ -362,14 +395,19 @@ class TMix_qwen2rwkv(TMix_qwen2):
         if not output_attentions:
             attn_weights = torch.empty(0, device=x.device)
 
-            attn_output = fla_chunk_simple_gla(query_states, key_states, value_states, decay_states_log.view(bsz, self.num_heads, q_len))[0]
+            #attn_output = fla_chunk_simple_gla(query_states, key_states, value_states, decay_states_log.view(bsz, self.num_heads, q_len))[0]
+            attn_output = fla_chunk_gla(query_states, key_states, value_states, decay_states_log.view(bsz, self.num_heads, q_len))[0]
             attn_output = attn_output.transpose(1, 2).contiguous()
             attn_output = attn_output.view(bsz, q_len, self.hidden_size)
             attn_output = self.ln_x(attn_output)
             attn_output = self.o_proj(attn_output)
         else:
             attn_weights = (query_states * (key_states.size(-1) ** -0.5)) @ key_states.mT
-            attn_weights = attn_weights.float() * self.segsum(decay_states_log.float()) # NOTE - without the explicit cast to float ddp mismatched deepspeed here
+            #attn_weights = attn_weights.float() * self.segsum(decay_states_log.float()) # NOTE - without the explicit cast to float ddp mismatched deepspeed here
+
+            w_cumsum_log = decay_states_log.cumsum(dim=-2)
+            attn_weights = attn_weights.float() * channel_decayed_linear_attention(query_states, key_states, w_cumsum_log)
+
             attn_weights = attn_weights.to(query_states.dtype)
             attn_output = torch.empty(0, device=x.device)
     
