@@ -36,8 +36,7 @@ def fla_chunk_simple_gla(
     g = g.float()
     initial_state = None
     output_final_state = False
-    checkpoint_level = 1
-    o, final_state = SimpleGLAFunction.apply(q, k, v, g, scale, initial_state, output_final_state, checkpoint_level)
+    o, final_state = SimpleGLAFunction.apply(q, k, v, g, scale, initial_state, output_final_state)
     return o, final_state
 
 from fla.ops.gla.chunk import chunk_gla, ChunkGLAFunction
@@ -49,10 +48,25 @@ def fla_chunk_gla(
     g: torch.Tensor,  # log decay
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     scale = q.shape[-1] ** -0.5
-    #g = g.float()
+    g = g.float()
     initial_state = None
     output_final_state = False
     o, final_state = ChunkGLAFunction.apply(q, k, v, g, scale, initial_state, output_final_state)
+    return o, final_state
+
+from fla.ops.gla.fused_chunk import fused_chunk_gla, FusedChunkGLAFunction
+
+def fla_chunk_gla(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g: torch.Tensor,  # log decay
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    scale = q.shape[-1] ** -0.5
+    g = g.float()
+    initial_state = None
+    output_final_state = False
+    o, final_state = FusedChunkGLAFunction.apply(q, k, v, g, scale, initial_state, output_final_state)
     return o, final_state
 
 
