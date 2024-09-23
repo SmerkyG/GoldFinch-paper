@@ -54,36 +54,6 @@ def fla_chunk_gla(
     o, final_state = ChunkGLAFunction.apply(q, k, v, g, scale, initial_state, output_final_state)
     return o, final_state
 
-from fla.ops.gla.fused_chunk import fused_chunk_gla, FusedChunkGLAFunction
-
-def pad(x, chunk_size=16):
-    T = x.shape[-2]
-    padded_seq_len = ceildiv(T, chunk_size) * chunk_size
-    if x.shape[-2] % chunk_size != 0:
-        x = F.pad(x, (0, 0, 0, padded_seq_len - T))
-
-    return x
-
-def ceildiv(a, b):
-    return -(a // -b)
-
-def fla_fused_chunk_gla(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
-    g: torch.Tensor,  # log decay
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    scale = q.shape[-1] ** -0.5
-    g = g.float()
-    initial_state = None
-    output_final_state = False
-    seq_len = q.shape[-2]
-    q, k, v, g = pad(q), pad(k), pad(v), pad(g)
-    o, final_state = FusedChunkGLAFunction.apply(q, k, v, g, scale, initial_state, output_final_state)
-    o = o[..., :seq_len, :]
-    return o, final_state
-
-
 # Copied from transformers.models.llama.modeling_llama.LlamaRMSNorm with Llama->Qwen2
 class Qwen2RMSNorm(nn.Module):
     def __init__(self, hidden_size, eps=1e-6):
@@ -406,7 +376,7 @@ class TMix_qwen2rwkv(TMix_qwen2):
             attn_weights = torch.empty(0, device=x.device)
 
             #attn_output = fla_chunk_simple_gla(query_states, key_states, value_states, decay_states_log.view(bsz, self.num_heads, q_len))[0]
-            attn_output = fla_fused_chunk_gla(query_states, key_states, value_states, decay_states_log)[0]
+            attn_output = fla_chunk_gla(query_states, key_states, value_states, decay_states_log)[0]
             attn_output = attn_output.transpose(1, 2).contiguous()
             attn_output = attn_output.view(bsz, q_len, self.hidden_size)
             attn_output = self.ln_x(attn_output)
