@@ -23,7 +23,9 @@ from configs import parse_cmdline_configs, TrainerCLI_Config, Model_Config, Runt
 os.environ["RWKV_JIT_ON"] = '1'
 os.environ["RWKV_CUDA_ON"] = '1'
 
-from src.pipeline import PIPELINE, PIPELINE_ARGS
+#from src.pipeline import PIPELINE, PIPELINE_ARGS
+
+from transformers.modeling_utils import load_state_dict, load_sharded_checkpoint
 
 from lm_eval import tasks, evaluator, utils
 from lm_eval.api.model import TemplateLM
@@ -103,15 +105,15 @@ device = 'cuda'
 model = model.to(device=device, dtype=dtype)
 model.eval()
 
-pipeline = PIPELINE(model, "rwkv_vocab_v20230424")
+#pipeline = PIPELINE(model, "rwkv_vocab_v20230424")
 
 eval_tasks = config.tasks.split(',')
 
-RWKV_PAD = pipeline.tokenizer.encode('\n') # we will use '\n' as PAD
+#RWKV_PAD = pipeline.tokenizer.encode('\n') # we will use '\n' as PAD
 #STOP_TOKEN = RWKV_PAD + pipeline.tokenizer.encode('\n\n') # we will use '\n\n' as STOP
 # RWKV_PAD = [0] # you can try using [0] as pad
 
-RWKV_PAD = -1 # means do not pad
+RWKV_PAD = [] # means do not pad
 
 print('RWKV_PAD', RWKV_PAD)
 #print('STOP_TOKEN', STOP_TOKEN)
@@ -243,7 +245,7 @@ class EvalHarnessAdapter(TemplateLM):
 
     def tok_decode(self, tokens):
         return self.tokenizer.decode(tokens)
-    
+
     @torch.no_grad()
     def _loglikelihood_tokens(self, requests, disable_tqdm=False):
         global logitBuf, correctBuf
@@ -251,33 +253,34 @@ class EvalHarnessAdapter(TemplateLM):
         res = []
 
         # sort requests by descending total length, so we batch together groups that have similar padded sizes, descending so we OOM early if at all
-        requests = sorted(requests, key=lambda x: len(x[0])+len(x[1]), reverse=True)
+        rq_indices = sorted(range(len(requests)),key=lambda i: len(requests[i][1])+len(requests[i][2]), reverse=True)
+
+        res = [None for _ in range(len(requests))]
 
         B = self.batch_size_per_gpu
         for nb in range(0, len(requests), B):
             ne = min(nb+B, len(requests))
 
             # stack and pad to longest
-            batch = []
+            batched_inputs = []
             batch_info = []
             maxlen = 0
             for i in range(nb, ne):
-                if RWKV_PAD >= 0:
-                    q = RWKV_PAD + requests[i][1]
-                else:
-                    q = requests[i][1]
-                src = q + requests[i][2]
+                rq_index = rq_indices[i]
+                request = requests[rq_index]
+                q = RWKV_PAD + request[1]
+                src = q + request[2]
                 input = torch.tensor(src, dtype=torch.long, device=device, requires_grad=False)
-                batch.append( input )
-                batch_info.append((len(q), len(src)))
+                batched_inputs.append( input )
+                batch_info.append((len(q), len(src), rq_index))
                 maxlen = max(maxlen, len(src))
 
             maxlen = (maxlen + 7) // 8 * 8 # round pad size up to nearest 8 for better GPU usage
-            for i in range(len(batch)):
-                batch[i] = F.pad(batch[i], (0, maxlen - batch[i].size(0)))
-            batch = torch.stack(batch, dim=0)
+            for i in range(len(batched_inputs)):
+                batched_inputs[i] = F.pad(batched_inputs[i], (0, maxlen - batched_inputs[i].size(0)))
+            batched_inputs = torch.stack(batched_inputs, dim=0)
 
-            results = model.forward(batch, None)
+            results = model.forward(batched_inputs, None)
             if isinstance(results, tuple):
                 logits = results[0]
                 #next_model_state = results[1]
@@ -289,31 +292,33 @@ class EvalHarnessAdapter(TemplateLM):
                 #next_model_state = last_model_state
                 
 
-            batched_logits = F.log_softmax(logits, dim=-1)
+            batched_logprobs = F.log_softmax(logits, dim=-1)
             # Check if per-token argmax is exactly equal to continuation
-            batched_greedy_toks = batched_logits.argmax(dim=-1)
+            batched_greedy_toks = batched_logprobs.argmax(dim=-1)
             
             for i, info in enumerate(batch_info):
-                q_len, src_len = info
+                q_len, src_len, rq_index = info
                 a_len = src_len - q_len
-                logits, a_toks, greedy_toks = batched_logits[i, q_len-1 : src_len-1], batch[i, q_len : src_len], batched_greedy_toks[i, q_len-1 : src_len-1]
-                assert logits.size(0) == a_len
+                logprobs, a_toks, greedy_toks = batched_logprobs[i, q_len-1 : src_len-1], batched_inputs[i, q_len : src_len], batched_greedy_toks[i, q_len-1 : src_len-1]
+                assert logprobs.size(0) == a_len
                 assert a_toks.size(0) == a_len
                 assert greedy_toks.size(0) == a_len
                 max_equal = (greedy_toks == a_toks).all()
         
                 # Obtain log-probs at the corresponding continuation ('answer') token indices
-                logprobs = torch.gather(logits, 1, a_toks.unsqueeze(-1)).squeeze(-1)
+                logprobs = torch.gather(logprobs, 1, a_toks.unsqueeze(-1)).squeeze(-1)
                 assert logprobs.size(0) == a_len
             
                 # Answer: (log prob, is-exact-match)
                 answer = (float(logprobs.sum()), bool(max_equal))
 
-                res.append(answer)
+                # place the answer into the slot that matches the original request (this is important or lm_eval_harness will return bad results!!!)
+                res[rq_index] = answer
 
             FREQ = 10 * B
             if nb % FREQ == 0:
                 print(f'{nb//FREQ}/{len(requests)//FREQ}', end = ' ', flush=True)
+
         return res
 
 if config.seed is None:
@@ -322,6 +327,7 @@ if config.seed is None:
 # tokenizer = TokenizerWrapper(pipeline.tokenizer) # RWKV tokenizer
 from transformers import Qwen2Tokenizer, Qwen2TokenizerFast
 tokenizer:transformers.PreTrainedTokenizer = Qwen2Tokenizer.from_pretrained('Qwen/Qwen-tokenizer')
+RWKV_PAD = [tokenizer.bos_token_id]
 
 adapter = EvalHarnessAdapter(batch_size_per_gpu=config.bsz, tokenizer=tokenizer)
 with torch.no_grad():
