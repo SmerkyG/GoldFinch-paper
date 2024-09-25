@@ -18,7 +18,7 @@ model:
 
 train:
   teacher:
-    path: out/qwen2-14B.pth
+    path: out/qwen2.5-14B.pth
     model:
       __type__: configs.Transformer_Config
       #tmix: qwen2
