@@ -8,17 +8,17 @@ model:
     vocab_padding_idx: 151646 
     num_key_value_heads: 8
     head_size: 128
-    n_embd: 8192
-    dim_ffn: 29568
+    n_embd: 5120
+    dim_ffn: 13824
     rms_norm_eps: 1e-5
-    n_layer: 80
+    n_layer: 48
     rope:
         __type__: configs.RoPE_Config
         base: 1000000.0
 
 train:
   teacher:
-    path: out/qwen2-72B.pth
+    path: out/qwen2-14B.pth
     model:
       __type__: configs.Transformer_Config
       #tmix: qwen2
@@ -28,10 +28,10 @@ train:
       vocab_padding_idx: 151646 
       num_key_value_heads: 8
       head_size: 128
-      n_embd: 8192
-      dim_ffn: 29568
+      n_embd: 5120
+      dim_ffn: 13824
       rms_norm_eps: 1e-5
-      n_layer: 80
+      n_layer: 48
       rope:
           __type__: configs.RoPE_Config
           base: 1000000.0
