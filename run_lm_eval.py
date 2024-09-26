@@ -23,7 +23,9 @@ os.environ["RWKV_CUDA_ON"] = '1'
 
 from src.pipeline import PIPELINE, PIPELINE_ARGS
 
-from lm_eval import tasks, evaluator, utils
+from src.logger import print0 as print
+
+from lm_eval import tasks, evaluator
 from lm_eval.api.model import TemplateLM
 
 ########################################################################################################
@@ -34,7 +36,7 @@ import typing
 @dataclass(kw_only=True)
 class CLI_Config:
     path: str
-    tasks: str = 'lambada_openai'
+    tasks: str = 'lambada_openai' # arc_challenge, arc_easy, headqa, openbookqa, hellaswag, winogrande, piqa, record, copa, storycloze_2016
     bsz: int = 48
     precision: int | str = 'bf16'
     seed: int | None = None
@@ -219,8 +221,6 @@ class EvalHarnessAdapter(TemplateLM):
     @torch.no_grad()
     def _loglikelihood_tokens(self, requests, disable_tqdm=False):
         global logitBuf, correctBuf
-
-        res = []
 
         # sort requests by descending total length, so we batch together groups that have similar padded sizes, descending so we OOM early if at all
         rq_indices = sorted(range(len(requests)),key=lambda i: len(requests[i][1])+len(requests[i][2]), reverse=True)
