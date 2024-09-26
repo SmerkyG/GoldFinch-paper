@@ -312,8 +312,6 @@ class EvalHarnessAdapter(TemplateLM):
     def _loglikelihood_tokens(self, requests, disable_tqdm=False):
         global logitBuf, correctBuf
 
-        res = []
-
         # sort requests by descending total length, so we batch together groups that have similar padded sizes, descending so we OOM early if at all
         rq_indices = sorted(range(len(requests)),key=lambda i: len(requests[i][1])+len(requests[i][2]), reverse=True)
 
