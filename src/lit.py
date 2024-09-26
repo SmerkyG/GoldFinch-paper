@@ -58,11 +58,10 @@ class LightningModelWrapper(pl.LightningModule):
     def configure_model(self):
         if hasattr(self.model, 'configure_model'):
             self.model.configure_model()
-        if hasattr(self.model, 'init_all_weights'):
-            self.model.init_all_weights()
+        self.init_all_weights()
 
     def init_all_weights(self):
-        if hasattr(self.model, 'init_all_weigths'):
+        if hasattr(self.model, 'init_all_weights'):
             self.model.init_all_weights()
 
     def load_weights(self):

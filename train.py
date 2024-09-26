@@ -152,7 +152,7 @@ if __name__ == "__main__":
     from src.trainer import train_callback
     from src.dataset import MyDataset, MMapDataset
 
-    from src.lit import LightningModelWrapper, create_initialized_lightning_trainer_for_inference
+    from src.lit import LightningModelWrapper
     from src.model import Transformer
     from qwen2.modeling_qwen2 import Qwen2ForCausalLM
     from qwen2.configuration_qwen2 import Qwen2Config
@@ -246,7 +246,6 @@ if __name__ == "__main__":
     if config.train.train_stage == 1:  # should we build the initial weights?
         if classname != '' or config.model.tmix.startswith("qwen2"):
             model.configure_model()
-            model.init_all_weights()
             mm = {k: v.cpu() for k, v in model.state_dict().items()} #model.state_dict()
         else:
             mm = model.generate_init_weight()
@@ -255,9 +254,6 @@ if __name__ == "__main__":
         torch.save(mm, init_weight_name)
         print("Done. Now go for stage 2.")
         exit(0)
-
-    #if config.train.train_stage == 0 or config.train.load_partial == 1:
-    #    model.init_all_weights()
 
     # if trainer.global_rank == 0:
     #     for n in model.state_dict():
