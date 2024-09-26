@@ -17,7 +17,7 @@ if __name__ == "__main__":
     import os, warnings, math, datetime, sys, time
     import numpy as np
     import torch
-    from torch.utils.data import DataLoader
+    from torch.utils.data import DataLoader, Dataset, TensorDataset
 
     from pydoc import locate
   
@@ -152,32 +152,12 @@ if __name__ == "__main__":
     from src.trainer import train_callback
     from src.dataset import MyDataset, MMapDataset
 
-    from src.lit import LightningModelWrapper
+    from src.lit import LightningModelWrapper, create_initialized_lightning_trainer_for_inference
     from src.model import Transformer
     from qwen2.modeling_qwen2 import Qwen2ForCausalLM
     from qwen2.configuration_qwen2 import Qwen2Config
 
     from safetensors.torch import load_file
-
-    # FIXME - why use_distributed_sampler=False? was this an oversight in the original repo? is this related to replace_sampler_ddp from Bo's code?
-    trainer = Trainer(
-                        use_distributed_sampler=False, 
-                        enable_checkpointing=False,
-                        num_sanity_val_steps=0,
-                        logger=False,
-                        max_epochs=-1,
-
-                        accelerator=config.train.accelerator, 
-                        strategy=config.train.strategy, 
-                        devices=config.train.devices, 
-                        num_nodes=config.train.num_nodes, 
-                        precision=config.train.precision,
-                        callbacks=[train_callback(config)], 
-                        check_val_every_n_epoch=config.train.check_val_every_n_epoch, 
-                        log_every_n_steps=config.train.log_every_n_steps, 
-                        accumulate_grad_batches=config.train.accumulate_grad_batches, 
-                        gradient_clip_val=config.train.gradient_clip_val, 
-                        val_check_interval=config.train.val_check_interval)
 
     qwen_cfg = {
         "attention_dropout": 0.0,
@@ -208,32 +188,45 @@ if __name__ == "__main__":
     if config.train.train_stage > 1:
         teacher_config = config.train.teacher
         if teacher_config is not None and teacher_config.path != '':
-            if teacher_config.path.lower().endswith('.safetensors'):
-                load_dict = load_file(teacher_config.path)
+            teacher_trainer = Trainer(
+                        use_distributed_sampler=False, 
+                        enable_checkpointing=False,
+                        num_sanity_val_steps=0,
+                        logger=False,
+                        max_epochs=-1,
+
+                        accelerator=config.train.accelerator, 
+                        strategy=config.train.strategy, 
+                        devices=config.train.devices, 
+                        num_nodes=config.train.num_nodes, 
+                        precision=config.train.precision,
+                        callbacks=[train_callback(config)], 
+                        check_val_every_n_epoch=config.train.check_val_every_n_epoch, 
+                        log_every_n_steps=config.train.log_every_n_steps, 
+                        accumulate_grad_batches=config.train.accumulate_grad_batches, 
+                        gradient_clip_val=config.train.gradient_clip_val, 
+                        val_check_interval=config.train.val_check_interval)
+
+            classname = teacher_config.model.classname
+            if classname != '':
+                teacher_classpath = f'models.{classname}.Model_{classname}'
+                teacher_factory = locate(teacher_classpath)
+                if teacher_factory is None:
+                    print(f"Unsupported teacher model type: {teacher_classpath}")
+                    exit(0)
+                teacher = teacher_factory(teacher_config)
+            elif teacher_config.model.tmix.startswith('qwen2'):
+                teacher = Qwen2ForCausalLM(Qwen2Config(rwkv='rwkv' in teacher_config.model.tmix, **qwen_cfg), teacher_config)
             else:
-                load_dict = torch.load(teacher_config.path, map_location="cpu")
-            with trainer.init_module(empty_init=True):
-                classname = teacher_config.model.classname
-                if classname != '':
-                    teacher_classpath = f'models.{classname}.Model_{classname}'
-                    teacher_factory = locate(teacher_classpath)
-                    if teacher_factory is None:
-                        print(f"Unsupported teacher model type: {teacher_classpath}")
-                        exit(0)
-                    teacher = teacher_factory(teacher_config)
-                    if classname.startswith('qwen2') and teacher_config.model.n_embd < 3584:
-                        load_dict['lm_head.weight'] = load_dict['model.embed_tokens.weight']
-                elif teacher_config.model.tmix.startswith('qwen2'):
-                    teacher = Qwen2ForCausalLM(Qwen2Config(rwkv='rwkv' in teacher_config.model.tmix, **qwen_cfg), teacher_config)
-                    if teacher_config.model.n_embd < 3584:
-                        load_dict['lm_head.weight'] = load_dict['model.embed_tokens.weight']
-                else:
-                    teacher = Transformer(teacher_config)
-            teacher.load_state_dict(load_dict)
+                teacher = Transformer(teacher_config)
+            teacher_wrapper = LightningModelWrapper(teacher, config, None)
+            #create_initialized_lightning_trainer_for_inference(teacher_trainer, teacher_wrapper)
+            teacher_trainer.predict(teacher_wrapper, dataloaders=DataLoader(TensorDataset(torch.zeros(1,dtype=torch.long))))
             teacher.eval()
             teacher.requires_grad_(False)
 
-    with trainer.init_module(empty_init=not config.train.load_partial):
+    #with trainer.init_module(empty_init=not config.train.load_partial):
+    if True:
         classname = config.model.classname
         if classname != '':
             model_classpath = f'models.{classname}.Model_{classname}'
@@ -251,69 +244,29 @@ if __name__ == "__main__":
         #     model.lm_head.weight = model.model.embed_tokens.weight
                             
     if config.train.train_stage == 1:  # should we build the initial weights?
-        init_weight_name = f"{config.runtime.proj_path}/rwkv-init.pth"
-        if classname != '':
-            model.apply(model._init_weights)
-            model.init_all_weights()
-            mm = {k: v.cpu() for k, v in model.state_dict().items()} #model.state_dict()
-        elif config.model.tmix.startswith("qwen2"):
-            model.apply(model._init_weights)
+        if classname != '' or config.model.tmix.startswith("qwen2"):
+            model.configure_model()
             model.init_all_weights()
             mm = {k: v.cpu() for k, v in model.state_dict().items()} #model.state_dict()
         else:
             mm = model.generate_init_weight()
+        init_weight_name = f"{config.runtime.proj_path}/rwkv-init.pth"
         print(f"Save to {init_weight_name}...")
         torch.save(mm, init_weight_name)
         print("Done. Now go for stage 2.")
         exit(0)
 
-    if config.train.train_stage >= 2:
-        rank_zero_info(f"########## Loading {config.train.load_model}... ##########")
-        if config.train.load_model.lower().endswith('.safetensors'):
-            load_dict = load_file(config.train.load_model)
-            if (classname.startswith('qwen2') or config.model.tmix.startswith('qwen2')) and config.model.n_embd < 3584:
-                load_dict['lm_head.weight'] = load_dict['model.embed_tokens.weight']
-        else:
-            load_dict = torch.load(config.train.load_model, map_location="cpu")
+    #if config.train.train_stage == 0 or config.train.load_partial == 1:
+    #    model.init_all_weights()
 
-    if config.train.train_stage == 0 or config.train.load_partial == 1:
-        if classname != '':
-            model.apply(model._init_weights)
-            model.init_all_weights()
-        elif config.model.tmix.startswith("qwen2"):
-            model.apply(model._init_weights)
-            model.init_all_weights()
-        #else:
-            #mm = model.init_weights() # already done in the constructor
-
-    if config.train.train_stage >= 2 and config.train.load_model != '':
-        # FIXME - hacked in weight tying
-        if (classname.startswith('qwen2') or config.model.tmix.startswith('qwen2')) and config.model.n_embd < 3584:
-            load_dict['lm_head.weight'] = load_dict['model.embed_tokens.weight']
-
-        if config.train.load_partial == 1:
-            load_keys = load_dict.keys()
-            for k in model.state_dict():
-                if k not in load_keys:
-                    load_dict[k] = model.state_dict()[k]
-        model.load_state_dict(load_dict, strict = not config.train.load_partial)
-
-        # # FIXME - hacked in weight tying [trying this new approach]
-        # if (classname.startswith('qwen2') or config.model.tmix.startswith('qwen2')) and config.model.n_embd < 3584:
-        #     model.lm_head.weight = model.model.embed_tokens.weight
-
-    if trainer.global_rank == 0:
-        for n in model.state_dict():
-            shape = model.state_dict()[n].shape
-            shape = [i for i in shape if i != 1]
-            if len(shape) > 1:
-                print(f"{str(shape[0]).ljust(5)} {str(shape[1]).ljust(5)} {n}")
-            else:
-                print(f"{str(shape[0]).ljust(5)}       {n}")
-
-    if "deepspeed" in config.train.strategy:
-        trainer.strategy.config["zero_optimization"]["allgather_bucket_size"] = config.train.ds_bucket_mb * 1000 * 1000
-        trainer.strategy.config["zero_optimization"]["reduce_bucket_size"] = config.train.ds_bucket_mb * 1000 * 1000
+    # if trainer.global_rank == 0:
+    #     for n in model.state_dict():
+    #         shape = model.state_dict()[n].shape
+    #         shape = [i for i in shape if i != 1]
+    #         if len(shape) > 1:
+    #             print(f"{str(shape[0]).ljust(5)} {str(shape[1]).ljust(5)} {n}")
+    #         else:
+    #             print(f"{str(shape[0]).ljust(5)}       {n}")
 
     if classname != '':
         pass
@@ -334,9 +287,33 @@ if __name__ == "__main__":
         #    if teacher is not None:
         #        teacher = torch.jit.script(teacher)
 
-    with trainer.init_module(empty_init=not config.train.load_partial):
-        wrapper = LightningModelWrapper(model, config, teacher)
+    #with trainer.init_module(empty_init=not config.train.load_partial):
+    wrapper = LightningModelWrapper(model, config, None) # delay setting the teacher until after init so deepspeed_stage_3 doesn't break it
        
+    # FIXME - why use_distributed_sampler=False? was this an oversight in the original repo? is this related to replace_sampler_ddp from Bo's code?
+    trainer = Trainer(
+                        use_distributed_sampler=False, 
+                        enable_checkpointing=False,
+                        num_sanity_val_steps=0,
+                        logger=False,
+                        max_epochs=-1,
+
+                        accelerator=config.train.accelerator, 
+                        strategy=config.train.strategy, 
+                        devices=config.train.devices, 
+                        num_nodes=config.train.num_nodes, 
+                        precision=config.train.precision,
+                        callbacks=[train_callback(config, teacher_wrapper)], 
+                        check_val_every_n_epoch=config.train.check_val_every_n_epoch, 
+                        log_every_n_steps=config.train.log_every_n_steps, 
+                        accumulate_grad_batches=config.train.accumulate_grad_batches, 
+                        gradient_clip_val=config.train.gradient_clip_val, 
+                        val_check_interval=config.train.val_check_interval)
+
+    if "deepspeed" in config.train.strategy:
+        trainer.strategy.config["zero_optimization"]["allgather_bucket_size"] = config.train.ds_bucket_mb * 1000 * 1000
+        trainer.strategy.config["zero_optimization"]["reduce_bucket_size"] = config.train.ds_bucket_mb * 1000 * 1000
+
     train_data = MyDataset(config, trainer)
     if config.train.validation_data_file != "":
         validation_data = MMapDataset(config.train.validation_data_file, config.model.ctx_len)

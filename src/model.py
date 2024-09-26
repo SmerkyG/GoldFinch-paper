@@ -180,8 +180,8 @@ class Transformer(nn.Module):
             self.w_kv_cache_a = nn.Linear(args.n_embd, int(args.n_embd / args.kv_cache_compression_ratio), bias=False)
             self.w_kv_cache_b = nn.Linear(int(args.n_embd / args.kv_cache_compression_ratio) + args.n_embd, args.dim_att, bias=False)
 
-        if self.training and hasattr(config, 'train') and config.train is not None and (getattr(config.train, 'load_partial', 0) or getattr(config.train, 'train_stage', 0) == 0):
-            self.init_weights()
+        #if self.training and hasattr(config, 'train') and config.train is not None and (getattr(config.train, 'load_partial', 0) or getattr(config.train, 'train_stage', 0) == 0):
+        #    self.init_weights()
 
     def ckpt(self, block, *block_args):
         if block.training and self.config.train.grad_cp == 1:
@@ -326,7 +326,7 @@ class Transformer(nn.Module):
 
         return optim_groups
 
-    def init_weights(self):
+    def init_all_weights(self):
         for name, m in self.named_modules():               
             scale = 1.0
             if isinstance(m, nn.Linear):

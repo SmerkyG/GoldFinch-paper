@@ -10,6 +10,11 @@ import lightning.pytorch as pl
 from lightning_utilities.core.rank_zero import rank_zero_info, rank_zero_only
 from lightning.pytorch.strategies import DeepSpeedStrategy
 
+import pickle
+import torch.distributed as dist
+from safetensors.torch import load_file
+from torch.utils.data import Dataset, DataLoader    
+
 from configs import TrainerCLI_Config, Model_Config, Transformer_Config, Train_Config
 
 from .state import ModelState
@@ -21,6 +26,7 @@ from src.logger import print0 as print
 if importlib.util.find_spec('deepspeed'):
     import deepspeed
     from deepspeed.ops.adam import DeepSpeedCPUAdam, FusedAdam
+    from deepspeed.utils import safe_set_full_fp32_param, safe_set_local_fp32_param, safe_set_full_optimizer_state
 
 def console_clear_last_line():
     print('\033[1A', end='\x1b[2K')
@@ -52,6 +58,165 @@ class LightningModelWrapper(pl.LightningModule):
     def configure_model(self):
         if hasattr(self.model, 'configure_model'):
             self.model.configure_model()
+        if hasattr(self.model, 'init_all_weights'):
+            self.model.init_all_weights()
+
+    def init_all_weights(self):
+        if hasattr(self.model, 'init_all_weigths'):
+            self.model.init_all_weights()
+
+    def load_weights(self):
+        # FIXME - allow loading from sharded model so we use less CPU RAM and don't require conversion from safetensors
+
+        # Load the model only on the master process (rank 0)
+        if self.global_rank == 0:
+            print("LIGHTNING RANK 0 = PYTORCH RANK", dist.get_rank())
+            ckpt_path = self.config.train.load_model
+            print("Loading ", ckpt_path, "on rank", self.global_rank)
+            if ckpt_path.lower().endswith('.safetensors'):
+                load_dict = load_file(ckpt_path, device='cpu')
+            else:
+                load_dict = torch.load(ckpt_path, map_location='cpu')
+                
+            # FIXME - this provides copies of tied weights, which isn't desirable for all models or when we want them to actually be tied
+            if 'lm_head.weight' not in load_dict:
+                load_dict['lm_head.weight'] = load_dict['model.embed_tokens.weight']
+
+            for k in load_dict.keys():
+                if k.startswith('_forward_module.'):
+                    load_dict[k.replace('_forward_module.','')] = load_dict[k]
+                    del load_dict[k]
+    
+            print("Loaded model on rank", self.local_rank)
+            for n in load_dict:
+                shape = load_dict[n].shape
+                shape = [i for i in shape if i != 1]
+                if len(shape) > 2:
+                    print(f"{str(shape[0]).ljust(5)} {str(shape[1]).ljust(5)} {str(shape[2]).ljust(5)} {n}")
+                elif len(shape) > 1:
+                    print(f"{str(shape[0]).ljust(5)} {str(shape[1]).ljust(5)}       {n}")
+                else:
+                    print(f"{str(shape[0]).ljust(5)}             {n}")
+        else:
+            load_dict = {}
+
+
+        # Create a list to hold sizes for broadcast
+        size_list = []
+        
+        # Prepare sizes list on rank 0
+        if self.global_rank == 0:
+            for k, v in load_dict.items():
+                size_list.append((k, v.shape))
+            
+            # Pickle the size_list
+            pickled_size_list = pickle.dumps(size_list)
+        else:
+            pickled_size_list = None
+        
+        dist.barrier()
+        
+        # Broadcast the pickled size_list from rank 0 to all other ranks
+        pickled_size_list = self.trainer.strategy.broadcast(pickled_size_list, src=0)
+        
+        # Unpickle the size_list on all ranks
+        size_list = pickle.loads(pickled_size_list)
+        
+        #print("Broadcasted tensor sizes list length:", len(size_list), "rank:", self.trainer.global_rank)
+        
+
+        size_dict = {}
+        # Update load_dict on non-master ranks using the received sizes
+        for item in size_list:
+            size_dict[item[0]] = item[1]
+
+        #print("Broadcasted tensor sizes length:", len(size_dict), "rank:", self.global_rank)
+        sorted_keys = sorted(size_dict.keys())
+
+        updated = 0
+        count = 0
+        print("\n" * 10)
+        # Synchronize and broadcast the load_dict to all processes
+        if self.global_rank == 0:
+            print(f"Progress: - | -                              ", end="\r", flush=True)
+        for name in sorted_keys:        
+            if self.global_rank == 0:
+                count += 1
+                progress = f"{count}/{len(size_dict)}"
+                print(f"Progress: {progress} | Sending name: {name}                              ", end="\r", flush=True)
+                # Ensure all ranks have the tensor to be broadcasted
+                tensor = load_dict[name].bfloat16().to(self.device)
+            else:
+                tensor = torch.zeros(size_dict[name], dtype=torch.bfloat16).to(self.device)
+                tensor.view(-1)[0] = -torch.inf # have to set this for some really strange reason but pytorch broadcast is so much faster
+
+                
+            #tensor = self.trainer.strategy.broadcast(tensor, src=0)
+            dist.broadcast(tensor, src=0)
+            
+
+            if tensor.shape != size_dict[name] or torch.sum(tensor) == -torch.inf:
+                print(tensor)
+                print("The broadcast failed for name: ", name)
+                
+            tensor = tensor.to(torch.bfloat16)
+            tensor = tensor.to(self.device)
+
+            #tensor = pickle.loads(tensor_pickle)
+                
+            
+            #print(tensor.shape, name, self.global_rank)
+            #self.configure_model()
+
+            # idk why it needs to be loaded this way, but the other way below doesn't work so idk
+            for n, p in self.named_parameters():
+                if n == name:
+                    #if p.shape == tensor.shape:
+                    
+                    if self.global_rank == 0:
+                        print("Setting param")
+                        
+                    safe_set_full_fp32_param(p, tensor)
+                    
+                    if self.global_rank == 0:
+                        print("Set param")
+                    #safe_set_local_fp32_param(p, tensor.to(self.device))
+                    updated += 1
+                    break
+
+            #if name in state_dict.keys():# and state_dict[name].shape == tensor.shape:
+            #    safe_set_full_fp32_param(state_dict[name], tensor.to(self.device))
+            #    updated += 1
+
+            #print(self.global_rank, name, tensor.shape)
+                    
+            #p = self.state_dict()[name]
+            #safe_set_full_fp32_param(p, tensor.cuda(self.local_rank))
+            
+            tensor = tensor.detach()
+            del tensor
+            torch.cuda.empty_cache()
+        dist.barrier()
+        
+        print("\nUpdated", updated, "keys on", self.global_rank)
+
+        tensor_diff_count = 0
+
+        for n, p in self.named_parameters():
+            if not torch.all(p == 0):
+                tensor_diff_count += 1
+
+        print("Non zero tensors rank", self.global_rank, "-", tensor_diff_count) 
+
+        del load_dict
+        torch.cuda.empty_cache()
+        # Optionally handle partial loading of model parameters
+        # Need to sort this out as it no longer works with the new distributed loading process.
+        #if self.args.load_partial == 1:
+        #    model_state_dict = self.state_dict()
+        #    for k in model_state_dict:
+        #        if k not in new_load_dict:
+        #            new_load_dict[k] = model_state_dict[k].cuda(self.local_rank)
 
     def forward(self, idx, last_model_state:ModelState|None = None):
         return self.model.forward(idx, last_model_state)
@@ -238,9 +403,13 @@ class LightningModelWrapper(pl.LightningModule):
             #metric.clear()
         #self.log("tokens", float(self.all_nodes_tokens_processed), on_epoch=True, rank_zero_only=True)
         return loss
-
+    
+    def predict_dataloader(self):
+        return DataLoader(mnist_predict, batch_size=self.batch_size)
+    
     # def training_step_end(self, batch_parts):
     #     if pl.__version__[0]!='2':
     #         all = self.all_gather(batch_parts)
     #         if self.trainer.is_global_zero:
     #             self.trainer.my_loss_all = all
+    

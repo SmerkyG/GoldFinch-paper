@@ -15,14 +15,23 @@ def my_save(config:TrainerCLI_Config, trainer:pl.Trainer, state_dict, path):
         torch.save(state_dict, path)
 
 class train_callback(pl.Callback):
-    def __init__(self, config:TrainerCLI_Config):
+    def __init__(self, config:TrainerCLI_Config, teacher:torch.nn.Module|None = None):
         super().__init__()
         self.config = config
+        self.teacher = teacher
+
+    def on_predict_start(self, trainer, pl_module) -> None:
+        pl_module.load_weights()
 
     def on_train_start(self, trainer, pl_module) -> None:
         # set current epoch properly so we don't need annoying calculations later on to adjust it
         trainer.fit_loop.epoch_progress.current.ready = self.config.train.epoch_begin
         trainer.fit_loop.epoch_progress.current.completed = self.config.train.epoch_begin
+
+        #pl_module.init_weights()
+        pl_module.load_weights()
+
+        pl_module.model.teacher = self.teacher
 
     def on_train_batch_start(self, trainer, pl_module, batch, batch_idx):
         config = self.config

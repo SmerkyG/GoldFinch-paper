@@ -442,6 +442,7 @@ class Qwen2DecoderLayer(nn.Module):
 
     def forward(self, x:Tensor, last_model_state:ModelState, shared:Shared, output_attentions:bool, output_post_attention_hidden_states:bool):
         s = last_model_state
+
         dx, last_timemix_state, attentions = self.self_attn(self.input_layernorm(x), s, shared, output_attentions)
         if output_post_attention_hidden_states:
             post_attention_hidden_states = dx
@@ -564,7 +565,7 @@ class Model_qwen2(nn.Module): # Qwen2CausalLM
 
         self.model = None
 
-        self.configure_model()
+        #self.configure_model()
 
     def configure_model(self):
         if self.model is not None: 
@@ -671,6 +672,7 @@ class Model_qwen2(nn.Module): # Qwen2CausalLM
                 module.weight.data[module.padding_idx].zero_()
 
     def init_all_weights(self):
+        self.apply(self._init_weights)
         for n, p in self.named_parameters():
             requires_grad_temp = p.requires_grad
             p.requires_grad_(False)
