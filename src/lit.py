@@ -80,7 +80,14 @@ class LightningModelWrapper(pl.LightningModule):
             # FIXME - this provides copies of tied weights, which isn't desirable for all models or when we want them to actually be tied
             if 'lm_head.weight' not in load_dict:
                 load_dict['lm_head.weight'] = load_dict['model.embed_tokens.weight']
-
+                
+            # FIXME - this gives the inline teacher the copies it needs of the self_attn weights
+            if self.config.train.attention_distillation_stage == 1:
+                keys = list(load_dict.keys())
+                for k in keys:
+                    if '.self_attn.' in k:
+                        load_dict[k.replace('self_attn', 'teacher_attn')] = load_dict[k]                            
+                        
             for k in load_dict.keys():
                 if k.startswith('_forward_module.'):
                     load_dict[k.replace('_forward_module.','')] = load_dict[k]
@@ -246,27 +253,20 @@ class LightningModelWrapper(pl.LightningModule):
         causal_mask = torch.full((T, T), fill_value=-torch.inf, dtype=torch.bfloat16, device=x.device).triu(1)
         causal_mask = causal_mask[None, None, :, :].expand(B, 1, -1, -1)
 
-        if self.training and self.teacher is not None and self.config.train.teacher.attention_distillation_stage in (1, 2):
-            stage = self.config.train.teacher.attention_distillation_stage
+        if self.training and self.config.train.attention_distillation_stage in (1, 2):
+            stage = self.config.train.attention_distillation_stage
             output_attentions = stage == 1
             output_post_attention_hidden_states = stage == 2
             # special code for attention output and/or attention matrix loss
-            with torch.no_grad():
-                if self.config.model.classname != '':
-                    teacher_results = self.teacher.forward(x, output_hidden_states=True, output_attentions=output_attentions, output_post_attention_hidden_states=output_post_attention_hidden_states)
-                else:
-                    teacher_results = self.teacher.forward(x, return_dict=True, attention_mask=causal_mask, output_hidden_states=True, output_attentions=output_attentions, output_post_attention_hidden_states=output_post_attention_hidden_states)
             if self.config.model.classname != '':
-                student_results = self.model.forward_attentions(teacher_results.hidden_states, last_model_state=last_model_state, output_attentions=output_attentions, output_post_attention_hidden_states=output_post_attention_hidden_states)
+                results = self.model.forward(x, output_hidden_states=False, output_attentions=output_attentions, output_post_attention_hidden_states=output_post_attention_hidden_states)
             else:
-                student_results = self.model.forward_attentions(teacher_results.hidden_states, attention_mask=causal_mask, output_attentions=output_attentions, output_post_attention_hidden_states=output_post_attention_hidden_states)
-            #for i in range(self.config.model.n_layer):
-            #    print('', i, float(teacher_results.hidden_states[i].min()), float(teacher_results.hidden_states[i].max()), float(teacher_results.attentions[i].min()), float(teacher_results.attentions[i].max()), float(student_results.attentions[i].min()), float(student_results.attentions[i].max()), )
-            #exit(0)
+                results = self.model.forward(x, return_dict=False, attention_mask=causal_mask, output_hidden_states=False, output_attentions=output_attentions, output_post_attention_hidden_states=output_post_attention_hidden_states)
+
             if stage == 1:
-                reported_loss = training_loss = torch.linalg.matrix_norm(torch.cat(teacher_results.attentions, dim=0) - torch.cat(student_results.attentions, dim=0)).mean() / teacher_results.attentions[0].size(-1)
+                reported_loss = training_loss = torch.linalg.matrix_norm(torch.cat(results.attentions, dim=0) - torch.cat(results.student_attentions, dim=0)).mean() / results.attentions[0].size(-1)
             else: # stage == 2:
-                reported_loss = training_loss = torch.linalg.vector_norm(torch.cat(teacher_results.post_attention_hidden_states, dim=0) - torch.cat(student_results.post_attention_hidden_states, dim=0), dim=-1).mean() * (student_results.post_attention_hidden_states[0].size(-1) ** -0.5)
+                reported_loss = training_loss = torch.linalg.vector_norm(torch.cat(results.post_attention_hidden_states, dim=0) - torch.cat(results.student_post_attention_hidden_states, dim=0), dim=-1).mean() * (results.post_attention_hidden_states[0].size(-1) ** -0.5)
             logits = torch.tensor([], device=x.device)
             preds = torch.zeros_like(y)
             return reported_loss, training_loss, logits, preds, last_model_state
@@ -291,7 +291,7 @@ class LightningModelWrapper(pl.LightningModule):
         with torch.no_grad():
             preds = logits.argmax(dim=-1)
 
-        if self.training and self.teacher is not None and self.config.train.teacher.attention_distillation_stage in (0, 3):
+        if self.training and self.teacher is not None:
             with torch.no_grad():
                 teacher_results = self.teacher.forward(x)
                 if isinstance(teacher_results, tuple):

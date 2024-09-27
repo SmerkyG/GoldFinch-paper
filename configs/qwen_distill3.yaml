@@ -21,7 +21,7 @@ train:
   proj_suffix: 5
   train_stage: 3
   load_model: out/qwen2-0B5-2/rwkv-final.pth
-  load_partial: 0
+  load_partial: 1
 
   data_type: "binidx" 
   data_file: "data/minipile_qwen2" 
@@ -48,7 +48,6 @@ train:
   
   teacher:
     path: out/qwen2-0B5.safetensors
-    attention_distillation_stage: 3
     kl_weight: 1.0
     ce_weight: 0.0
     model:

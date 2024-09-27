@@ -127,6 +127,8 @@ class LLMOutput:
     hidden_states: Optional[Tuple[torch.FloatTensor, ...]] = None
     attentions: Optional[Tuple[torch.FloatTensor, ...]] = None
     post_attention_hidden_states: Optional[Tuple[torch.FloatTensor, ...]] = None
+    student_attentions: Optional[Tuple[torch.FloatTensor, ...]] = None
+    student_post_attention_hidden_states: Optional[Tuple[torch.FloatTensor, ...]] = None
 
 class TMix_qwen2(nn.Module):
     def get_default_state_factory(self): return get_tmix_default_state
@@ -217,12 +219,10 @@ class TMix_qwen2(nn.Module):
             #attn_weights = attn_weights.tril()
             #attn_weights = (attn_weights - attn_weights.max() + causal_mask).exp()
             #attn_weights = (attn_weights - torch.max(attn_weights, dim=-1, keepdim=True).values + causal_mask).exp()
-
-
-            y = nn.functional.scaled_dot_product_attention(q, k, v, dropout_p=0.0, is_causal=is_causal)
         else:
             attn_weights = torch.empty(0, device=x.device)
-            y = nn.functional.scaled_dot_product_attention(q, k, v, dropout_p=0.0, is_causal=is_causal)
+
+        y = nn.functional.scaled_dot_product_attention(q, k, v, dropout_p=0.0, is_causal=is_causal)
         y = y.transpose(1,2).reshape(B,L,D)
         y = self.o_proj(y)
         return y, TimeMixState(wkv_state, last_state.shift_state), attn_weights
@@ -428,30 +428,42 @@ class Qwen2DecoderLayer(nn.Module):
         self.input_layernorm = Qwen2RMSNorm(args.n_embd, eps=args.rms_norm_eps)
         self.post_attention_layernorm = Qwen2RMSNorm(args.n_embd, eps=args.rms_norm_eps)
 
-        tmix_factory = TMix_qwen2
-        if config.model.attention_type == 'rwkv':
-            tmix_factory = TMix_qwen2rwkv
-        tmix = tmix_factory(args, layer_id)
         cmix = CMix_qwen2(args, layer_id)
 
-        self.default_time_mix_state_factory = tmix.get_default_state_factory() if hasattr(tmix, 'get_default_state_factory') else lambda x, c, r: TimeMixState()
-        self.self_attn = tmix
+        if args.attention_type == 'rwkv':
+            self.self_attn = TMix_qwen2rwkv(args, layer_id)
+        else:
+            self.self_attn = TMix_qwen2(args, layer_id)
+        self.default_time_mix_state_factory = self.self_attn.get_default_state_factory() if hasattr(self.self_attn, 'get_default_state_factory') else lambda x, c, r: TimeMixState()
+
+        self.teacher_attn = None
+        if config.train is not None:
+            if config.train.attention_distillation_stage in (1, 2):
+                self.teacher_attn = TMix_qwen2(args, layer_id)
+                self.teacher_attn.requires_grad_(False)
         
         self.default_channel_mix_state_factory = cmix.get_default_state_factory() if hasattr(cmix, 'get_default_state_factory') else lambda x, c, r: ChannelMixState()
         self.mlp = cmix
 
     def forward(self, x:Tensor, last_model_state:ModelState, shared:Shared, output_attentions:bool, output_post_attention_hidden_states:bool):
         s = last_model_state
-
-        dx, last_timemix_state, attentions = self.self_attn(self.input_layernorm(x), s, shared, output_attentions)
+        if self.teacher_attn is not None:
+            dx, last_timemix_state, attentions = self.teacher_attn(self.input_layernorm(x), s, shared, output_attentions)
+            student_dx, student_last_timemix_state, student_attentions = self.self_attn(self.input_layernorm(x), s, shared, output_attentions)
+        else:
+            dx, last_timemix_state, attentions = self.self_attn(self.input_layernorm(x), s, shared, output_attentions)
+            student_dx, student_last_timemix_state, student_attentions = None, None, None
         if output_post_attention_hidden_states:
             post_attention_hidden_states = dx
+            student_post_attention_hidden_states = student_dx
         else:
             post_attention_hidden_states = torch.empty(0, device=x.device)
+            student_post_attention_hidden_states = torch.empty(0, device=x.device)
+            
         x = x + dx
         dx, last_chanmix_state = self.mlp(self.post_attention_layernorm(x), s)
         x = x + dx
-        return x, s, attentions, post_attention_hidden_states
+        return x, s, attentions, post_attention_hidden_states, student_attentions, student_post_attention_hidden_states
 
 def ckpt(block:Qwen2DecoderLayer, *block_args):
     if block.training and block.config.train.grad_cp == 1:
@@ -504,24 +516,6 @@ class Qwen2Decoder(nn.Module):
 
         return last_model_state
 
-
-    def forward_attentions(self, all_hidden_states:Tuple[torch.Tensor], last_model_state:ModelState|None = None, output_attentions=True, output_post_attention_hidden_states=True):
-        last_model_state = self.forward_preamble(all_hidden_states[0], last_model_state)
-
-        attentions_outputs, post_attention_hidden_states_outputs = (), ()
-
-        for decoder_layer in self.layers:
-            layer_id = decoder_layer.self_attn.layer_id
-            hidden_states = decoder_layer.input_layernorm(all_hidden_states[layer_id])
-            post_attention_hidden_states, last_timemix_state, attentions = decoder_layer.self_attn(hidden_states, last_model_state, self.shared, output_attentions=output_attentions)
-            if output_post_attention_hidden_states:
-                post_attention_hidden_states_outputs += (post_attention_hidden_states,)
-            if output_attentions:
-                attentions_outputs += (attentions,)
-
-        return LLMOutput(None, last_model_state, None, attentions_outputs, post_attention_hidden_states_outputs)
-        #return attentions_outputs, post_attention_hidden_states_outputs
-
     def forward(self, token_ids:Tensor|list, last_model_state:ModelState|None = None, output_hidden_states:bool=False, output_attentions:bool=False, output_post_attention_hidden_states:bool=False):
         config : Transformer_Config = self.config.model
         if isinstance(token_ids, Tensor):
@@ -536,18 +530,23 @@ class Qwen2Decoder(nn.Module):
         last_model_state = self.forward_preamble(x, last_model_state)
 
         hidden_states_outputs, attentions_outputs, post_attention_hidden_states_outputs = (), (), ()
+        student_hidden_states_outputs, student_attentions_outputs, student_post_attention_hidden_states_outputs = (), (), ()
         if output_hidden_states:
             hidden_states_outputs += (x,)
+            student_hidden_states_outputs += (x,)
         for decoder_layer in self.layers:
-            x, s, attentions, post_attention_hidden_states = ckpt(decoder_layer, x, last_model_state, self.shared, output_attentions, output_post_attention_hidden_states)
+            x, s, attentions, post_attention_hidden_states, student_attentions, student_post_attention_hidden_states = ckpt(decoder_layer, x, last_model_state, self.shared, output_attentions, output_post_attention_hidden_states)
             hidden_states_outputs += (x,)
+            student_hidden_states_outputs += (x,)
             if output_attentions:
                 attentions_outputs += (attentions,)
+                student_attentions_outputs += (student_attentions,)
             if output_post_attention_hidden_states:
                 post_attention_hidden_states_outputs += (post_attention_hidden_states,)
+                student_post_attention_hidden_states_outputs += (student_post_attention_hidden_states,)
 
         x = self.norm(x)
-        return LLMOutput(x, last_model_state, hidden_states_outputs, attentions_outputs, post_attention_hidden_states_outputs)
+        return LLMOutput(x, last_model_state, hidden_states_outputs, attentions_outputs, post_attention_hidden_states_outputs, student_attentions_outputs, student_post_attention_hidden_states_outputs)
         #return x, last_model_state, hidden_states_outputs, attentions_outputs, post_attention_hidden_states_outputs # FIXME - not updating state at all
 
 class Model_qwen2(nn.Module): # Qwen2CausalLM
@@ -575,38 +574,31 @@ class Model_qwen2(nn.Module): # Qwen2CausalLM
 
         self.lm_head = nn.Linear(self.config.model.n_embd, self.config.model.vocab_size, bias=False)
 
-    def forward_attentions(self, all_hidden_states:Tuple[torch.Tensor], last_model_state:ModelState|None = None, output_attentions=True, output_post_attention_hidden_states=True):
-        #print("student q min, max", float(self.model.layers[0].self_attn.q_proj.weight.min()), float(self.model.layers[0].self_attn.q_proj.weight.max()))
-        return self.model.forward_attentions(all_hidden_states, last_model_state=last_model_state, output_attentions=output_attentions, output_post_attention_hidden_states=output_post_attention_hidden_states)
-
     def forward(self, token_ids:Tensor|list, last_model_state:ModelState|None = None, output_hidden_states:bool=False, output_attentions:bool=False, output_post_attention_hidden_states:bool=False):
         #print("teacher q min, max", float(self.model.layers[0].self_attn.q_proj.weight.min()), float(self.model.layers[0].self_attn.q_proj.weight.max()))
         results = self.model(token_ids, last_model_state=last_model_state, output_hidden_states=output_hidden_states, output_attentions=output_attentions, output_post_attention_hidden_states=output_post_attention_hidden_states)
         results.logits = self.lm_head(results.logits)
         return results
-        # x, s, hidden_states_outputs, attention_outputs, post_attention_hidden_states_outputs = self.model(token_ids)
-        # return self.lm_head(x), s, hidden_states_outputs, attention_outputs, post_attention_hidden_states_outputs
     
     def get_optim_groups(self):
         # separates groups for weight decay and non-weight decay
 
         train_config = self.config.train
 
-        if train_config.teacher is not None and train_config.teacher.attention_distillation_stage <= 2:
-            self.model.embed_tokens.requires_grad_(False)
+        if train_config.attention_distillation_stage in (1, 2):
+            self.requires_grad_(False)
             for decoder_layer in self.model.layers:
-                decoder_layer.post_attention_layernorm.requires_grad_(False)
-                for p in decoder_layer.mlp.parameters():
-                    p.requires_grad_(False)
-                if train_config.teacher.attention_distillation_stage <= 1:
-                    decoder_layer.self_attn.time_maa_v.requires_grad_(False)
-                    decoder_layer.self_attn.v_proj.weight.requires_grad_(False)
-                    decoder_layer.self_attn.v_proj.bias.requires_grad_(False)
-                    decoder_layer.self_attn.o_proj.weight.requires_grad_(False)
-                    decoder_layer.self_attn.ln_x.weight.requires_grad_(False)
-                    decoder_layer.self_attn.ln_x.bias.requires_grad_(False)
-            self.model.norm.requires_grad_(False)
-            self.lm_head.requires_grad_(False)
+                if train_config.attention_distillation_stage == 1:
+                    decoder_layer.self_attn.time_maa_x.requires_grad_(True)
+                    decoder_layer.self_attn.time_maa_r.requires_grad_(True)
+                    decoder_layer.self_attn.time_maa_k.requires_grad_(True)
+                    decoder_layer.self_attn.time_maa_w1.requires_grad_(True)
+                    decoder_layer.self_attn.time_maa_w2.requires_grad_(True)
+                    decoder_layer.self_attn.time_decay.requires_grad_(True)
+                    decoder_layer.self_attn.time_decay_w1.requires_grad_(True)
+                    decoder_layer.self_attn.time_decay_w2.requires_grad_(True)
+                elif train_config.attention_distillation_stage == 2:
+                    decoder_layer.self_attn.requires_grad_(True)
 
         # FIXME - remove these for full training
         # for decoder_layer in self.model.layers:

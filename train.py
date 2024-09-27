@@ -185,6 +185,7 @@ if __name__ == "__main__":
     }
 
     teacher = None
+    teacher_wrapper = None
     if config.train.train_stage > 1:
         teacher_config = config.train.teacher
         if teacher_config is not None and teacher_config.path != '':

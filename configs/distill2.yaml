@@ -24,5 +24,4 @@ train:
   grad_cp: 0
   ds_bucket_mb: 200 # set to 2 for consumer GPUs, set to 200 for A100 / H100 (affects speed & vram usage)
     
-  teacher:
-    attention_distillation_stage: 2
+  attention_distillation_stage: 2
