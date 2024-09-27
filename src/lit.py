@@ -67,8 +67,13 @@ class LightningModelWrapper(pl.LightningModule):
     def load_weights(self):
         # FIXME - allow loading from sharded model so we use less CPU RAM and don't require conversion from safetensors
 
+        ds3 = False
+        if self.config.train is not None:
+            if self.config.train.strategy == 'deepspeed_stage_3':
+                ds3 = True
+
         # Load the model only on the master process (rank 0)
-        if self.global_rank == 0:
+        if self.global_rank == 0 or not ds3:
             print("LIGHTNING RANK 0 = PYTORCH RANK", dist.get_rank())
             ckpt_path = self.config.train.load_model
             print("Loading ", ckpt_path, "on rank", self.global_rank)
@@ -103,9 +108,13 @@ class LightningModelWrapper(pl.LightningModule):
                     print(f"{str(shape[0]).ljust(5)} {str(shape[1]).ljust(5)}       {n}")
                 else:
                     print(f"{str(shape[0]).ljust(5)}             {n}")
+
+            if not ds3:
+                self.model.load_state_dict(load_dict, strict = not self.config.train.load_partial)
+                del load_dict
+                return
         else:
             load_dict = {}
-
 
         # Create a list to hold sizes for broadcast
         size_list = []
