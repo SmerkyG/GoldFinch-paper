@@ -1,0 +1,19 @@
+train:
+  teacher:
+    path: out/qwen2.5-72B.pth
+    model:
+      __type__: configs.Transformer_Config
+      #tmix: qwen2
+      classname: qwen2
+      ctx_len: 512 # 4096
+      vocab_size: 152064
+      vocab_padding_idx: 151646 
+      num_key_value_heads: 8
+      head_size: 128
+      n_embd: 8192
+      dim_ffn: 29568
+      rms_norm_eps: 1e-5
+      n_layer: 80
+      rope:
+          __type__: configs.RoPE_Config
+          base: 1000000.0
