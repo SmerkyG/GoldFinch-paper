@@ -286,6 +286,13 @@ if __name__ == "__main__":
         #else:
             #mm = model.init_weights() # already done in the constructor
 
+    if config.train.attention_distillation_stage == 1:
+        if (classname.startswith('qwen2') or config.model.tmix.startswith('qwen2')):
+            keys = list(load_dict.keys())
+            for k in keys:
+                if '.self_attn.' in k:
+                    load_dict[k.replace('self_attn', 'teacher_attn')] = load_dict[k]
+
     if config.train.train_stage >= 2 and config.train.load_model != '':
         # FIXME - hacked in weight tying
         if (classname.startswith('qwen2') or config.model.tmix.startswith('qwen2')) and config.model.n_embd < 3584:
