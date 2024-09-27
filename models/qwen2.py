@@ -436,11 +436,11 @@ class Qwen2DecoderLayer(nn.Module):
             self.self_attn = TMix_qwen2(args, layer_id)
         self.default_time_mix_state_factory = self.self_attn.get_default_state_factory() if hasattr(self.self_attn, 'get_default_state_factory') else lambda x, c, r: TimeMixState()
 
-        if config.train is not None and config.train.attention_distillation_stage in (1, 2):
-            self.teacher_attn = TMix_qwen2(args, layer_id)
-            self.teacher_attn.requires_grad_(False)
-        else:
-            self.teacher_attn = None
+        self.teacher_attn = None
+        if config.train is not None:
+            if config.train.attention_distillation_stage in (1, 2):
+                self.teacher_attn = TMix_qwen2(args, layer_id)
+                self.teacher_attn.requires_grad_(False)
         
         self.default_channel_mix_state_factory = cmix.get_default_state_factory() if hasattr(cmix, 'get_default_state_factory') else lambda x, c, r: ChannelMixState()
         self.mlp = cmix
