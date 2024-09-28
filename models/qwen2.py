@@ -440,7 +440,6 @@ class Qwen2DecoderLayer(nn.Module):
         if config.train is not None:
             if config.train.attention_distillation_stage in (1, 2):
                 self.teacher_attn = TMix_qwen2(args, layer_id)
-                self.teacher_attn.requires_grad_(False)
         
         self.default_channel_mix_state_factory = cmix.get_default_state_factory() if hasattr(cmix, 'get_default_state_factory') else lambda x, c, r: ChannelMixState()
         self.mlp = cmix
@@ -592,11 +591,13 @@ class Model_qwen2(nn.Module): # Qwen2CausalLM
                     decoder_layer.self_attn.time_maa_x.requires_grad_(True)
                     decoder_layer.self_attn.time_maa_r.requires_grad_(True)
                     decoder_layer.self_attn.time_maa_k.requires_grad_(True)
+                    #decoder_layer.self_attn.time_maa_w.requires_grad_(True) # FIXME!!! we left this out!
                     decoder_layer.self_attn.time_maa_w1.requires_grad_(True)
                     decoder_layer.self_attn.time_maa_w2.requires_grad_(True)
                     decoder_layer.self_attn.time_decay.requires_grad_(True)
                     decoder_layer.self_attn.time_decay_w1.requires_grad_(True)
                     decoder_layer.self_attn.time_decay_w2.requires_grad_(True)
+                    # FIXME - wow we removed q, k here by accident and it.. helped??!?!
                 elif train_config.attention_distillation_stage == 2:
                     decoder_layer.self_attn.requires_grad_(True)
 

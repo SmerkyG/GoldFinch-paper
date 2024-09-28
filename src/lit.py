@@ -65,6 +65,83 @@ class LightningModelWrapper(pl.LightningModule):
             self.model.init_all_weights()
 
     def load_weights(self):
+        ckpt_path = self.config.train.load_model
+        print("Loading ", ckpt_path)
+        if ckpt_path.lower().endswith('.safetensors'):
+            load_dict = load_file(ckpt_path, device='cpu')
+        else:
+            load_dict = torch.load(ckpt_path, map_location='cpu')
+            
+        # FIXME - this provides copies of tied weights, which isn't desirable for all models or when we want them to actually be tied
+        if 'lm_head.weight' not in load_dict:
+            load_dict['lm_head.weight'] = load_dict['model.embed_tokens.weight']
+            
+        # FIXME - this gives the inline teacher the copies it needs of the self_attn weights
+        if self.config.train.attention_distillation_stage == 1:
+            keys = list(load_dict.keys())
+            for k in keys:
+                if '.self_attn.' in k:
+                    load_dict[k.replace('self_attn', 'teacher_attn')] = load_dict[k]                            
+
+        strict = False
+
+        model = self.model
+        #with deepspeed.zero.GatheredParameters(list(model.parameters()), modifier_rank=0):
+        #    if deepspeed.comm.get_rank() == 0:
+        #        model.load_state_dict(load_dict, strict=False)
+
+        # see https://github.com/microsoft/DeepSpeed/blob/8cded575a94e296fee751072e862304676c95316/deepspeed/runtime/zero/partition_parameters.py#L2172
+        # see trainer.strategy.load_model_state_dict https://lightning.ai/docs/pytorch/stable/_modules/lightning/pytorch/strategies/deepspeed.html
+
+        """Overrides the normal load_state_dict behaviour in PyTorch to ensure we gather parameters that may be sharded
+        across processes before loading the state dictionary when using ZeRO stage 3. This is then automatically synced
+        across processes.
+
+        Args:
+            ckpt: The ckpt file.
+
+        """
+
+        #assert self.lightning_module is not None
+
+        def load(module: torch.nn.Module, prefix: str = "") -> None:
+            print("loading prefix", prefix)
+            missing_keys = []
+            unexpected_keys = []
+            error_msgs = []
+
+            # copy state_dict so _load_from_state_dict can modify it
+            metadata = getattr(load_dict, "_metadata", None)
+            state_dict = load_dict.copy()
+            if metadata is not None:
+                state_dict._metadata = metadata
+
+            local_metadata = {} if metadata is None else metadata.get(prefix[:-1], {})
+            # because zero3 puts placeholders in model params, this context
+            # manager gathers (unpartitions) the params of the current layer, then loads from
+            # the state dict and then re-partitions them again
+            with deepspeed.zero.GatheredParameters(list(module.parameters(recurse=False)), modifier_rank=0):
+                if deepspeed.comm.get_rank() == 0:
+                    module._load_from_state_dict(
+                        state_dict=state_dict,
+                        prefix=prefix,
+                        local_metadata=local_metadata,
+                        strict=strict,
+                        missing_keys=missing_keys,
+                        unexpected_keys=unexpected_keys,
+                        error_msgs=error_msgs,
+                    )
+                    if len(error_msgs) > 0:
+                        print("ERROR", error_msgs)
+                        exit(0)
+
+            for name, child in module._modules.items():
+                if child is not None:
+                    load(child, prefix + name + ".")
+
+        load(model, prefix="")
+
+    def load_weights_old(self):
         # FIXME - allow loading from sharded model so we use less CPU RAM and don't require conversion from safetensors
 
         ds3 = False
