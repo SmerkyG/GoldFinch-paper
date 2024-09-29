@@ -64,13 +64,41 @@ class LightningModelWrapper(pl.LightningModule):
         if hasattr(self.model, 'init_all_weights'):
             self.model.init_all_weights()
 
-    def load_weights(self):
-        ckpt_path = self.config.train.load_model
-        if ckpt_path.endswith('/checkpoint') or ckpt_path.endswith('/checkpoint/'):
-            # model already loaded as part of lightning
-            return
+    def save_weights(self, path):
+        print("saving ", path)
+        config = self.config
 
-        print("Loading ", ckpt_path)
+        if 'deepspeed_stage_3' not in config.train.strategy:
+            save_dict = self.model.state_dict()
+        else:
+            
+            # FIXME - this would save the whole model as well as optimizer state and dataset state
+            #self.trainer.save_checkpoint(path, weights_only=True,)
+
+            def save(module: torch.nn.Module, prefix: str = "", save_dict:dict|None=None) -> dict:
+                if save_dict is None:
+                    save_dict = {}
+                #print("saving prefix", prefix)
+                with deepspeed.zero.GatheredParameters(list(module.parameters(recurse=False)), modifier_rank=0):
+                    if deepspeed.comm.get_rank() == 0:
+                        for n, p in module.named_parameters():
+                            save_dict[prefix + n] = p.detach().cpu()
+
+                for name, child in module._modules.items():
+                    if child is not None:
+                        save(child, prefix + name + ".", save_dict)
+                        
+                return save_dict
+
+            save_dict = save(self.model)
+
+        torch.save(save_dict, path)
+
+    def load_weights(self):
+        config = self.config
+        ckpt_path = config.train.load_model
+
+        print("Loading ", ckpt_path)       
         if ckpt_path.lower().endswith('.safetensors'):
             load_dict = load_file(ckpt_path, device='cpu')
         else:
@@ -81,7 +109,7 @@ class LightningModelWrapper(pl.LightningModule):
             load_dict['lm_head.weight'] = load_dict['model.embed_tokens.weight']
             
         # FIXME - this gives the inline teacher the copies it needs of the self_attn weights
-        if self.config.train.attention_distillation_stage == 1:
+        if config.train.attention_distillation_stage == 1:
             keys = list(load_dict.keys())
             for k in keys:
                 if '.self_attn.' in k:

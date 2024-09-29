@@ -8,12 +8,6 @@ from configs import TrainerCLI_Config
 
 from src.logger import print0 as print
 
-def my_save(config:TrainerCLI_Config, trainer:pl.Trainer, state_dict, path):
-    if 'deepspeed_stage_3' in config.train.strategy:
-        trainer.save_checkpoint(path, weights_only=True)
-    else:
-        torch.save(state_dict, path)
-
 class train_callback(pl.Callback):
     def __init__(self, config:TrainerCLI_Config, teacher:torch.nn.Module|None = None):
         super().__init__()
@@ -28,7 +22,8 @@ class train_callback(pl.Callback):
         trainer.fit_loop.epoch_progress.current.ready = self.config.train.epoch_begin
         trainer.fit_loop.epoch_progress.current.completed = self.config.train.epoch_begin
 
-        pl_module.load_weights()
+        if 'deepspeed_stage_3' not in self.config.train.strategy:
+            pl_module.load_weights()
 
         pl_module.model.teacher = self.teacher
 
@@ -61,11 +56,7 @@ class train_callback(pl.Callback):
 
             if lr_progress >= 1:
                 if (trainer.is_global_zero) or ('deepspeed_stage_3' in config.train.strategy):
-                    my_save(
-                        config, trainer,
-                        pl_module.model.state_dict(),
-                        f"{config.runtime.proj_path}/rwkv-final.pth",
-                    )
+                    pl_module.save_weights(f"{config.runtime.proj_path}/rwkv-final.pth")
                     print("!!!TRAINING COMPLETE!!!")
                     exit(0)
 
@@ -148,11 +139,7 @@ class train_callback(pl.Callback):
             if config.train.magic_prime > 0:
                 expand_factor = 1
                 if int(real_global_step) == int(config.train.magic_prime * expand_factor // self.config.runtime.global_step_bsz) - 1:
-                    my_save(
-                        config, trainer,
-                        pl_module.model.state_dict(),
-                        f"{config.runtime.proj_path}/rwkv-final.pth",
-                    )
+                    pl_module.save_weights(f"{config.runtime.proj_path}/rwkv-final.pth")
                 
 
     def on_train_epoch_start(self, trainer, pl_module):
@@ -171,11 +158,7 @@ class train_callback(pl.Callback):
         if (trainer.is_global_zero) or ('deepspeed_stage_3' in config.train.strategy):  # save pth
             if (config.train.epoch_save > 0 and (real_current_epoch+1) % config.train.epoch_save == 0) or (real_current_epoch == config.runtime.epoch_count - 1):
                 try:
-                    my_save(
-                        config, trainer,
-                        pl_module.model.state_dict(),
-                        f"{config.runtime.proj_path}/rwkv-{trainer.current_epoch}.pth",
-                    )
+                    pl_module.save_weights(f"{config.runtime.proj_path}/rwkv-{trainer.current_epoch}.pth")
                 except Exception as e:
                     print('Error\n\n', e, '\n\n')
 
