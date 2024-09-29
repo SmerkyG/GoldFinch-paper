@@ -323,6 +323,6 @@ if __name__ == "__main__":
         validation_data_loader = DataLoader(validation_data, shuffle=False, pin_memory=True, batch_size=config.train.micro_bsz, num_workers=1, persistent_workers=False, drop_last=True)
 
     ds_ckpt_path = None
-    if config.train.load_model.endswith('/'):
+    if config.train.load_model.endswith('/latest'):
         ds_ckpt_path = config.train.load_model
     trainer.fit(wrapper, train_dataloaders=train_data_loader, val_dataloaders=validation_data_loader, ckpt_path=ds_ckpt_path)

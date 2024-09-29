@@ -66,7 +66,7 @@ class LightningModelWrapper(pl.LightningModule):
 
     def load_weights(self):
         ckpt_path = self.config.train.load_model
-        if ckpt_path.endswith('/'):
+        if ckpt_path.endswith('/latest'):
             # model already loaded as part of lightning
             return
 
