@@ -94,13 +94,14 @@ class LightningModelWrapper(pl.LightningModule):
         model = self.model
         if 'fsdp' in config.train.strategy:
             from torch.distributed.fsdp import FullyShardedDataParallel as FSDP, StateDictType, FullStateDictConfig, FullOptimStateDictConfig
-            with FSDP.state_dict_type(
+            # FIXME - context manager was crashing on release
+            FSDP.set_state_dict_type(
                 self,
                 StateDictType.FULL_STATE_DICT,
                 FullStateDictConfig(offload_to_cpu=True, rank0_only=True),
                 FullOptimStateDictConfig(offload_to_cpu=True, rank0_only=True),
-            ):
-                save_dict = model.state_dict()
+            )
+            save_dict = model.state_dict()
         elif 'deepspeed_stage_3' not in config.train.strategy:
             save_dict = model.state_dict()
         else:
