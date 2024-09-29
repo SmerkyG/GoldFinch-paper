@@ -133,7 +133,7 @@ if __name__ == "__main__":
     if str(config.train.precision).startswith("16"):
         rank_zero_info("\n\nNote: you are using fp16 (might overflow). Try bf16 / tf32 for stable training.\n\n")
 
-    if "deepspeed_stage_3" in config.train.strategy:
+    if "deepspeed_stage_3" in config.train.strategy or "fsdp" in config.train.strategy:
         os.environ["RWKV_JIT_ON"] = "0"
 
     torch.backends.cudnn.benchmark = True
