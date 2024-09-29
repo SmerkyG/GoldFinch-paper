@@ -66,6 +66,10 @@ class LightningModelWrapper(pl.LightningModule):
 
     def load_weights(self):
         ckpt_path = self.config.train.load_model
+        if ckpt_path.endswith('/'):
+            # model already loaded as part of lightning
+            return
+
         print("Loading ", ckpt_path)
         if ckpt_path.lower().endswith('.safetensors'):
             load_dict = load_file(ckpt_path, device='cpu')
