@@ -22,8 +22,7 @@ class train_callback(pl.Callback):
         trainer.fit_loop.epoch_progress.current.ready = self.config.train.epoch_begin
         trainer.fit_loop.epoch_progress.current.completed = self.config.train.epoch_begin
 
-        if 'deepspeed_stage_3' not in self.config.train.strategy:
-            pl_module.load_weights()
+        pl_module.load_weights()
 
         pl_module.model.teacher = self.teacher
 
