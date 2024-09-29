@@ -63,9 +63,29 @@ class LightningModelWrapper(pl.LightningModule):
             if self.config.train.load_model == '' or self.config.train.load_partial:
                 self.init_all_weights()
 
+        if 'deepspeed_stage_3' not in self.config.train.strategy:
+            self.load_weights()
+
     def init_all_weights(self):
         if hasattr(self.model, 'init_all_weights'):
             self.model.init_all_weights()
+
+    def configure_gradient_clipping(
+            self,
+            optimizer,
+            gradient_clip_val = None,
+            gradient_clip_algorithm = None,
+    ):
+        if 'fsdp' in self.config.train.strategy:
+            assert gradient_clip_algorithm in ('norm', None), gradient_clip_algorithm
+            #self.model.clip_grad_norm_(gradient_clip_val)
+            #self.clip_grad_by_norm(optimizer, clip_val)
+            #self.clip_gradients(optimizer, gradient_clip_val, gradient_clip_algorithm)
+            if gradient_clip_algorithm == 'norm':
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), gradient_clip_val)
+        else:
+            self.clip_gradients(optimizer, gradient_clip_val=gradient_clip_val, gradient_clip_algorithm=gradient_clip_algorithm)
+
 
     def save_weights(self, path):
         print("saving ", path)
@@ -118,9 +138,14 @@ class LightningModelWrapper(pl.LightningModule):
                 if '.self_attn.' in k:
                     load_dict[k.replace('self_attn', 'teacher_attn')] = load_dict[k]                            
 
-        strict = False
+        strict = not config.train.load_partial
 
         model = self.model
+
+        if 'deepspeed_stage_3' not in config.train.strategy:
+            model.load_state_dict(load_dict, strict=strict)
+            return
+
         #with deepspeed.zero.GatheredParameters(list(model.parameters()), modifier_rank=0):
         #    if deepspeed.comm.get_rank() == 0:
         #        model.load_state_dict(load_dict, strict=False)
