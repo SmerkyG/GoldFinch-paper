@@ -66,7 +66,7 @@ class LightningModelWrapper(pl.LightningModule):
 
     def load_weights(self):
         ckpt_path = self.config.train.load_model
-        if ckpt_path.endswith('.ckpt'):
+        if ckpt_path.endswith('/checkpoint') or ckpt_path.endswith('/checkpoint/'):
             # model already loaded as part of lightning
             return
 
