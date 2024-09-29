@@ -95,7 +95,7 @@ class LightningModelWrapper(pl.LightningModule):
         if 'fsdp' in config.train.strategy:
             from torch.distributed.fsdp import FullyShardedDataParallel as FSDP, StateDictType, FullStateDictConfig, FullOptimStateDictConfig
             with FSDP.state_dict_type(
-                model,
+                self,
                 StateDictType.FULL_STATE_DICT,
                 FullStateDictConfig(offload_to_cpu=True, rank0_only=True),
                 FullOptimStateDictConfig(offload_to_cpu=True, rank0_only=True),
