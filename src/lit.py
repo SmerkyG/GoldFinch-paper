@@ -94,14 +94,29 @@ class LightningModelWrapper(pl.LightningModule):
         model = self.model
         if 'fsdp' in config.train.strategy:
             from torch.distributed.fsdp import FullyShardedDataParallel as FSDP, StateDictType, FullStateDictConfig, FullOptimStateDictConfig
+
+            # NOTE - this is how we get the FSDP wrapped model - if you use self you won't get the right output saved!!!
+            model:nn.Module = self.trainer.strategy.model
+            # annoyingly, we are REQUIRED to get the state dict from the FSDP module, which is only the top level LightningModelWrapper
+            # so, get it, then edit the dict to remove the `model.` prefix
+
+            assert(any(isinstance(m, FSDP) for m in model.modules()))
             # FIXME - context manager was crashing on release
             FSDP.set_state_dict_type(
-                self,
+                model,
                 StateDictType.FULL_STATE_DICT,
                 FullStateDictConfig(offload_to_cpu=True, rank0_only=True),
-                FullOptimStateDictConfig(offload_to_cpu=True, rank0_only=True),
             )
-            save_dict = model.state_dict()
+            with FSDP.state_dict_type(
+                model,
+                StateDictType.FULL_STATE_DICT,
+                FullStateDictConfig(offload_to_cpu=True, rank0_only=True),
+            ):
+                save_dict = model.state_dict()
+                for k in list(save_dict.keys()):
+                    if k.startswith('model.'):
+                        save_dict[k[len('model.'):]] = save_dict[k]
+                        del save_dict[k]
         elif 'deepspeed_stage_3' not in config.train.strategy:
             save_dict = model.state_dict()
         else:
@@ -126,7 +141,8 @@ class LightningModelWrapper(pl.LightningModule):
 
             save_dict = save(model)
 
-        torch.save(save_dict, path)
+        if self.trainer.local_rank == 0:
+            torch.save(save_dict, path)
 
     def load_weights(self):
         config = self.config

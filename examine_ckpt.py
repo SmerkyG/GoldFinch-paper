@@ -20,4 +20,7 @@ else:
 
 state_dict_keys = list(state_dict.keys())
 for name in state_dict_keys:
-    print(name, state_dict[name].shape, float(state_dict[name].min()), float(state_dict[name].max()))
+    if state_dict[name].numel() == 0:
+        print(name, state_dict[name].shape)
+    else:
+        print(name, state_dict[name].shape, float(state_dict[name].min()), float(state_dict[name].max()))
