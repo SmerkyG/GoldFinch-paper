@@ -91,8 +91,18 @@ class LightningModelWrapper(pl.LightningModule):
         print("saving ", path)
         config = self.config
 
-        if 'deepspeed_stage_3' not in config.train.strategy:
-            save_dict = self.model.state_dict()
+        model = self.model
+        if 'fsdp' in config.train.strategy:
+            from torch.distributed.fsdp import FullyShardedDataParallel as FSDP, StateDictType, FullStateDictConfig, FullOptimStateDictConfig
+            with FSDP.state_dict_type(
+                model,
+                StateDictType.FULL_STATE_DICT,
+                FullStateDictConfig(offload_to_cpu=True, rank0_only=True),
+                FullOptimStateDictConfig(offload_to_cpu=True, rank0_only=True),
+            ):
+                save_dict = model.state_dict()
+        elif 'deepspeed_stage_3' not in config.train.strategy:
+            save_dict = model.state_dict()
         else:
             
             # FIXME - this would save the whole model as well as optimizer state and dataset state
@@ -113,7 +123,7 @@ class LightningModelWrapper(pl.LightningModule):
                         
                 return save_dict
 
-            save_dict = save(self.model)
+            save_dict = save(model)
 
         torch.save(save_dict, path)
 
