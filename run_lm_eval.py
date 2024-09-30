@@ -84,6 +84,9 @@ with torch.device('meta'):
     #    model = Qwen2ForCausalLM(Qwen2Config(rwkv='rwkv' in config.model.tmix, **qwen_cfg), config)
     else:
         model = Transformer(config)
+
+if hasattr(model, 'configure_model'):
+    model.configure_model()
 model.load_state_dict(load_dict, assign=True)
 
 match config.precision:
