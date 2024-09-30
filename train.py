@@ -32,7 +32,9 @@ if __name__ == "__main__":
         import deepspeed
 
     strategy_obj = config.train.strategy
+    teacher_strategy_obj = config.train.strategy
     if 'fsdp' in config.train.strategy:
+        teacher_strategy_obj = FSDPStrategy(sync_module_states=True)
         strategy_obj = FSDPStrategy(sync_module_states=True)
 
     np.set_printoptions(precision=4, suppress=True, linewidth=200)
@@ -200,7 +202,7 @@ if __name__ == "__main__":
                 logger=False,
 
                 accelerator=config.train.accelerator, 
-                strategy=strategy_obj, 
+                strategy=teacher_strategy_obj, 
                 devices=config.train.devices, 
                 num_nodes=config.train.num_nodes, 
                 precision=config.train.precision,
