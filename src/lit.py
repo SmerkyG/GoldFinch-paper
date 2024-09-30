@@ -56,19 +56,29 @@ class LightningModelWrapper(pl.LightningModule):
         self.config = config
         self.teacher = teacher
         self.metrics = dict(loss=metrics.Loss(), acc=metrics.Accuracy())
+        self.configured = False
+
+        if 'fsdp' in self.config.train.strategy:
+            self.configure_model()
+
 
     def configure_model(self):
+        if self.configured:
+            return
+        self.configured = True
+
         if hasattr(self.model, 'configure_model'):
             self.model.configure_model()
 
         if self.config.train is not None:
-            if self.config.train.load_model == '' or self.config.train.load_partial:
+            if self.config.train.load_model == '' or (self.config.train.load_partial and self.config.train.attention_distillation_stage != 3):
                 self.init_all_weights()
 
         if 'deepspeed_stage_3' not in self.config.train.strategy:
             self.load_weights()
 
     def init_all_weights(self):
+        print("Initializing weights...")
         if hasattr(self.model, 'init_all_weights'):
             self.model.init_all_weights()
 
@@ -148,9 +158,9 @@ class LightningModelWrapper(pl.LightningModule):
         config = self.config
         ckpt_path = config.train.load_model
 
-        if 'fsdp' in config.train.strategy:
-            if self.trainer.local_rank != 0:
-                return
+        #if 'fsdp' in config.train.strategy:
+        #    if self.trainer.local_rank != 0:
+        #        return
 
         print("Loading ", ckpt_path)       
         if ckpt_path.lower().endswith('.safetensors'):

@@ -11,6 +11,8 @@ if __name__ == "__main__":
     import lightning as pl
     from lightning.pytorch.strategies.fsdp import FSDPStrategy
 
+    import models.qwen2
+
     rank_zero_info("########## work in progress ##########")
 
     ########################################################################################################
@@ -34,8 +36,12 @@ if __name__ == "__main__":
     strategy_obj = config.train.strategy
     teacher_strategy_obj = config.train.strategy
     if 'fsdp' in config.train.strategy:
-        teacher_strategy_obj = FSDPStrategy(sync_module_states=True)
-        strategy_obj = FSDPStrategy(sync_module_states=True)
+        from torch.distributed.fsdp.wrap import size_based_auto_wrap_policy
+        auto_wrap_policy = size_based_auto_wrap_policy
+        activation_checkpointing_policy = { models.qwen2.Qwen2DecoderLayer }
+
+        teacher_strategy_obj = FSDPStrategy(auto_wrap_policy=auto_wrap_policy, sync_module_states=True)
+        strategy_obj = FSDPStrategy(auto_wrap_policy=auto_wrap_policy, activation_checkpointing_policy=activation_checkpointing_policy, sync_module_states=True)
 
     np.set_printoptions(precision=4, suppress=True, linewidth=200)
     warnings.filterwarnings("ignore", ".*Consider increasing the value of the `num_workers` argument*")
