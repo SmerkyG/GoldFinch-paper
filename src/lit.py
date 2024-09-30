@@ -50,11 +50,11 @@ class L2Wrap(torch.autograd.Function):
         return (grad_output, gy)
 
 class LightningModelWrapper(pl.LightningModule):
-    def __init__(self, model:nn.Module, config:TrainerCLI_Config, teacher:nn.Module|None):
+    def __init__(self, model:nn.Module, config:TrainerCLI_Config):
         super().__init__()
         self.model = model
         self.config = config
-        self.teacher = teacher
+        self.teacher = None # delay setting this so ds3 works properly
         self.metrics = dict(loss=metrics.Loss(), acc=metrics.Accuracy())
         self.configured = False
 

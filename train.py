@@ -289,7 +289,7 @@ if __name__ == "__main__":
         #        teacher = torch.jit.script(teacher)
 
     #with trainer.init_module(empty_init=not config.train.load_partial):
-    wrapper = LightningModelWrapper(model, config, None) # delay setting the teacher until after init so deepspeed_stage_3 doesn't break it
+    wrapper = LightningModelWrapper(model, config) # delay setting the teacher until after init so deepspeed_stage_3 doesn't break it
        
     # FIXME - why use_distributed_sampler=False? was this an oversight in the original repo? is this related to replace_sampler_ddp from Bo's code?
     trainer = Trainer(
@@ -304,7 +304,7 @@ if __name__ == "__main__":
                         devices=config.train.devices, 
                         num_nodes=config.train.num_nodes, 
                         precision=config.train.precision,
-                        callbacks=[train_callback(config)], 
+                        callbacks=[train_callback(config, teacher_wrapper)], 
                         check_val_every_n_epoch=config.train.check_val_every_n_epoch, 
                         log_every_n_steps=config.train.log_every_n_steps, 
                         accumulate_grad_batches=config.train.accumulate_grad_batches, 
