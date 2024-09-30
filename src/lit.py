@@ -157,6 +157,8 @@ class LightningModelWrapper(pl.LightningModule):
     def load_weights(self):
         config = self.config
         ckpt_path = config.train.load_model
+        if ckpt_path == '':
+            return
 
         #if 'fsdp' in config.train.strategy:
         #    if self.trainer.local_rank != 0:
