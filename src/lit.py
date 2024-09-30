@@ -17,6 +17,8 @@ from torch.utils.data import Dataset, DataLoader
 
 from configs import TrainerCLI_Config, Model_Config, Transformer_Config, Train_Config
 
+from torch.distributed.fsdp import FullyShardedDataParallel as FSDP, StateDictType, FullStateDictConfig, FullOptimStateDictConfig
+
 from .state import ModelState
 
 import src.metrics as metrics
@@ -93,8 +95,6 @@ class LightningModelWrapper(pl.LightningModule):
 
         model = self.model
         if 'fsdp' in config.train.strategy:
-            from torch.distributed.fsdp import FullyShardedDataParallel as FSDP, StateDictType, FullStateDictConfig, FullOptimStateDictConfig
-
             # NOTE - this is how we get the FSDP wrapped model - if you use self you won't get the right output saved!!!
             model:nn.Module = self.trainer.strategy.model
             # annoyingly, we are REQUIRED to get the state dict from the FSDP module, which is only the top level LightningModelWrapper
@@ -107,16 +107,16 @@ class LightningModelWrapper(pl.LightningModule):
                 StateDictType.FULL_STATE_DICT,
                 FullStateDictConfig(offload_to_cpu=True, rank0_only=True),
             )
-            with FSDP.state_dict_type(
-                model,
-                StateDictType.FULL_STATE_DICT,
-                FullStateDictConfig(offload_to_cpu=True, rank0_only=True),
-            ):
-                save_dict = model.state_dict()
-                for k in list(save_dict.keys()):
-                    if k.startswith('model.'):
-                        save_dict[k[len('model.'):]] = save_dict[k]
-                        del save_dict[k]
+            # with FSDP.state_dict_type(
+            #     model,
+            #     StateDictType.FULL_STATE_DICT,
+            #     FullStateDictConfig(offload_to_cpu=True, rank0_only=True),
+            # ):
+            save_dict = model.state_dict()
+            for k in list(save_dict.keys()):
+                if k.startswith('model.'):
+                    save_dict[k[len('model.'):]] = save_dict[k]
+                    del save_dict[k]
         elif 'deepspeed_stage_3' not in config.train.strategy:
             save_dict = model.state_dict()
         else:
@@ -147,6 +147,10 @@ class LightningModelWrapper(pl.LightningModule):
     def load_weights(self):
         config = self.config
         ckpt_path = config.train.load_model
+
+        if 'fsdp' in config.train.strategy:
+            if self.trainer.local_rank != 0:
+                return
 
         print("Loading ", ckpt_path)       
         if ckpt_path.lower().endswith('.safetensors'):

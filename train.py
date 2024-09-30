@@ -9,6 +9,7 @@ if __name__ == "__main__":
     from lightning import Trainer
     from lightning_utilities.core.rank_zero import rank_zero_info, rank_zero_only
     import lightning as pl
+    from lightning.pytorch.strategies.fsdp import FSDPStrategy
 
     rank_zero_info("########## work in progress ##########")
 
@@ -29,6 +30,10 @@ if __name__ == "__main__":
 
     if "deepspeed" in config.train.strategy:
         import deepspeed
+
+    strategy_obj = config.train.strategy
+    if 'fsdp' in config.train.strategy:
+        strategy_obj = FSDPStrategy(sync_module_states=True)
 
     np.set_printoptions(precision=4, suppress=True, linewidth=200)
     warnings.filterwarnings("ignore", ".*Consider increasing the value of the `num_workers` argument*")
@@ -195,7 +200,7 @@ if __name__ == "__main__":
                 logger=False,
 
                 accelerator=config.train.accelerator, 
-                strategy=config.train.strategy, 
+                strategy=strategy_obj, 
                 devices=config.train.devices, 
                 num_nodes=config.train.num_nodes, 
                 precision=config.train.precision,
@@ -289,7 +294,7 @@ if __name__ == "__main__":
                         max_epochs=-1,
 
                         accelerator=config.train.accelerator, 
-                        strategy=config.train.strategy, 
+                        strategy=strategy_obj, 
                         devices=config.train.devices, 
                         num_nodes=config.train.num_nodes, 
                         precision=config.train.precision,
