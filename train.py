@@ -304,7 +304,7 @@ if __name__ == "__main__":
                         devices=config.train.devices, 
                         num_nodes=config.train.num_nodes, 
                         precision=config.train.precision,
-                        callbacks=[train_callback(config, teacher_wrapper)], 
+                        callbacks=[train_callback(config)], 
                         check_val_every_n_epoch=config.train.check_val_every_n_epoch, 
                         log_every_n_steps=config.train.log_every_n_steps, 
                         accumulate_grad_batches=config.train.accumulate_grad_batches, 
