@@ -224,7 +224,7 @@ if __name__ == "__main__":
                 teacher = Qwen2ForCausalLM(Qwen2Config(rwkv='rwkv' in teacher_config.model.tmix, **qwen_cfg), teacher_config)
             else:
                 teacher = Transformer(teacher_config)
-            teacher_wrapper = LightningModelWrapper(teacher, config, None)
+            teacher_wrapper = LightningModelWrapper(teacher, config)
             #create_initialized_lightning_trainer_for_inference(teacher_trainer, teacher_wrapper)
             teacher_trainer.predict(teacher_wrapper, dataloaders=DataLoader(TensorDataset(torch.zeros(1,dtype=torch.long))))
             teacher.eval()
