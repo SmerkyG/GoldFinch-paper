@@ -190,23 +190,16 @@ if __name__ == "__main__":
         teacher_config = config.train.teacher
         if teacher_config is not None and teacher_config.path != '':
             teacher_trainer = Trainer(
-                        use_distributed_sampler=False, 
-                        enable_checkpointing=False,
-                        num_sanity_val_steps=0,
-                        logger=False,
-                        max_epochs=-1,
+                use_distributed_sampler=False, 
+                num_sanity_val_steps=0,
+                logger=False,
 
-                        accelerator=config.train.accelerator, 
-                        strategy=config.train.strategy, 
-                        devices=config.train.devices, 
-                        num_nodes=config.train.num_nodes, 
-                        precision=config.train.precision,
-                        callbacks=[train_callback(config)], 
-                        check_val_every_n_epoch=config.train.check_val_every_n_epoch, 
-                        log_every_n_steps=config.train.log_every_n_steps, 
-                        accumulate_grad_batches=config.train.accumulate_grad_batches, 
-                        gradient_clip_val=config.train.gradient_clip_val, 
-                        val_check_interval=config.train.val_check_interval)
+                accelerator=config.train.accelerator, 
+                strategy=config.train.strategy, 
+                devices=config.train.devices, 
+                num_nodes=config.train.num_nodes, 
+                precision=config.train.precision,
+            )
 
             classname = teacher_config.model.classname
             if classname != '':
