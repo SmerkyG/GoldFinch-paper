@@ -11,8 +11,6 @@ if __name__ == "__main__":
     import lightning as pl
     from lightning.pytorch.strategies.fsdp import FSDPStrategy
 
-    import models.qwen2
-
     rank_zero_info("########## work in progress ##########")
 
     ########################################################################################################
@@ -29,19 +27,6 @@ if __name__ == "__main__":
         print(errors)
         exit()
     
-
-    if "deepspeed" in config.train.strategy:
-        import deepspeed
-
-    strategy_obj = config.train.strategy
-    teacher_strategy_obj = config.train.strategy
-    if 'fsdp' in config.train.strategy:
-        from torch.distributed.fsdp.wrap import size_based_auto_wrap_policy
-        auto_wrap_policy = size_based_auto_wrap_policy
-        activation_checkpointing_policy = { models.qwen2.Qwen2DecoderLayer }
-
-        teacher_strategy_obj = FSDPStrategy(auto_wrap_policy=auto_wrap_policy, sync_module_states=True)
-        strategy_obj = FSDPStrategy(auto_wrap_policy=auto_wrap_policy, activation_checkpointing_policy=activation_checkpointing_policy, sync_module_states=True)
 
     np.set_printoptions(precision=4, suppress=True, linewidth=200)
     warnings.filterwarnings("ignore", ".*Consider increasing the value of the `num_workers` argument*")
@@ -171,6 +156,19 @@ if __name__ == "__main__":
     from qwen2.configuration_qwen2 import Qwen2Config
 
     from safetensors.torch import load_file
+
+    # NOTE - this import MUST come AFTER the JIT gets disabled above or that disabling won't take effect correctly for the model
+    import models.qwen2
+
+    strategy_obj = config.train.strategy
+    teacher_strategy_obj = config.train.strategy
+    if 'fsdp' in config.train.strategy:
+        from torch.distributed.fsdp.wrap import size_based_auto_wrap_policy
+        auto_wrap_policy = size_based_auto_wrap_policy
+        activation_checkpointing_policy = { models.qwen2.Qwen2DecoderLayer }
+
+        teacher_strategy_obj = FSDPStrategy(auto_wrap_policy=auto_wrap_policy, sync_module_states=True)
+        strategy_obj = FSDPStrategy(auto_wrap_policy=auto_wrap_policy, activation_checkpointing_policy=activation_checkpointing_policy, sync_module_states=True)
 
     qwen_cfg = {
         "attention_dropout": 0.0,

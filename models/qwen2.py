@@ -465,7 +465,7 @@ class Qwen2DecoderLayer(nn.Module):
         return x, s, attentions, post_attention_hidden_states, student_attentions, student_post_attention_hidden_states
 
 def ckpt(block:Qwen2DecoderLayer, *block_args):
-    if block.training and block.config.train.grad_cp == 1:
+    if block.training and block.config.train.grad_cp == 1 and 'fsdp' not in block.config.train.strategy: # FSDP has its own checkpointing wrapper
         #if "deepspeed" in block.config.train.strategy:
         #    results = deepspeed.checkpointing.checkpoint(block, *block_args)
         #else:
