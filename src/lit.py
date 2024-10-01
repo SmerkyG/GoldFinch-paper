@@ -120,13 +120,16 @@ class LightningModelWrapper(pl.LightningModule):
             #     FullStateDictConfig(offload_to_cpu=True, rank0_only=True),
             # ):
             save_dict = model.state_dict()
-            for k in list(save_dict.keys()):
-                if k.startswith('model.'):
-                    save_dict[k[len('model.'):]] = save_dict[k]
-                    del save_dict[k]
+            if self.trainer.local_rank == 0:
+                for k in list(save_dict.keys()):
+                    if k.startswith('model.'):
+                        save_dict[k[len('model.'):]] = save_dict[k]
+                        del save_dict[k]
         elif 'deepspeed_stage_3' not in config.train.strategy:
             save_dict = model.state_dict()
         else:
+            if not self.trainer.is_global_zero:
+                return
             
             # FIXME - this would save the whole model as well as optimizer state and dataset state
             #self.trainer.save_checkpoint(path, weights_only=True,)

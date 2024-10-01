@@ -49,10 +49,9 @@ class train_callback(pl.Callback):
                     exit()
 
             if lr_progress >= 1:
-                if (trainer.is_global_zero) or ('deepspeed_stage_3' in config.train.strategy):
-                    pl_module.save_weights(f"{config.runtime.proj_path}/rwkv-final.pth")
-                    print("!!!TRAINING COMPLETE!!!")
-                    exit(0)
+                pl_module.save_weights(f"{config.runtime.proj_path}/rwkv-final.pth")
+                print("!!!TRAINING COMPLETE!!!")
+                exit(0)
 
         if trainer.global_step < config.train.warmup_steps:
             #lr = lr * (0.2 + 0.8 * trainer.global_step / config.train.warmup_steps)
@@ -129,11 +128,10 @@ class train_callback(pl.Callback):
             #     if kt_s > 0:
             #         lll["kt/s"] = kt_s
             #     trainer.my_wandb.log(lll, step=int(real_global_step))
-        if (trainer.is_global_zero) or ('deepspeed_stage_3' in config.train.strategy): # save pth
-            if config.train.magic_prime > 0:
-                expand_factor = 1
-                if int(real_global_step) == int(config.train.magic_prime * expand_factor // self.config.runtime.global_step_bsz) - 1:
-                    pl_module.save_weights(f"{config.runtime.proj_path}/rwkv-final.pth")
+        if config.train.magic_prime > 0:
+            expand_factor = 1
+            if int(real_global_step) == int(config.train.magic_prime * expand_factor // self.config.runtime.global_step_bsz) - 1:
+                pl_module.save_weights(f"{config.runtime.proj_path}/rwkv-final.pth")
                 
 
     def on_train_epoch_start(self, trainer, pl_module):
@@ -149,12 +147,11 @@ class train_callback(pl.Callback):
         config = self.config
         to_save_dict = {}
         real_current_epoch = trainer.current_epoch
-        if (trainer.is_global_zero) or ('deepspeed_stage_3' in config.train.strategy):  # save pth
-            if (config.train.epoch_save > 0 and (real_current_epoch+1) % config.train.epoch_save == 0) or (real_current_epoch == config.runtime.epoch_count - 1):
-                try:
-                    pl_module.save_weights(f"{config.runtime.proj_path}/rwkv-{trainer.current_epoch}.pth")
-                except Exception as e:
-                    print('Error\n\n', e, '\n\n')
+        if (config.train.epoch_save > 0 and (real_current_epoch+1) % config.train.epoch_save == 0) or (real_current_epoch == config.runtime.epoch_count - 1):
+            try:
+                pl_module.save_weights(f"{config.runtime.proj_path}/rwkv-{trainer.current_epoch}.pth")
+            except Exception as e:
+                print('Error\n\n', e, '\n\n')
 
         if trainer.is_global_zero:  # logging
             trainer.my_log.write(f"{real_current_epoch} {trainer.my_epoch_loss:.6f} {math.exp(trainer.my_epoch_loss):.4f} {trainer.my_lr:.8f} {datetime.datetime.now()} {real_current_epoch - config.train.epoch_begin}\n")
