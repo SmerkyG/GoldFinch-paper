@@ -9,10 +9,9 @@ from configs import TrainerCLI_Config
 from src.logger import print0 as print
 
 class train_callback(pl.Callback):
-    def __init__(self, config:TrainerCLI_Config, teacher:torch.nn.Module|None = None):
+    def __init__(self, config:TrainerCLI_Config):
         super().__init__()
         self.config = config
-        self.teacher = teacher
 
     def on_predict_start(self, trainer, pl_module) -> None:
         pl_module.load_weights()
@@ -21,12 +20,6 @@ class train_callback(pl.Callback):
         # set current epoch properly so we don't need annoying calculations later on to adjust it
         trainer.fit_loop.epoch_progress.current.ready = self.config.train.epoch_begin
         trainer.fit_loop.epoch_progress.current.completed = self.config.train.epoch_begin
-
-        if 'deepspeed_stage_3' in self.config.train.strategy:
-            pl_module.load_weights()
-
-        # delayed setting of teacher to help ds3 work properly
-        pl_module.teacher = self.teacher
 
     def on_train_batch_start(self, trainer, pl_module, batch, batch_idx):
         config = self.config

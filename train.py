@@ -161,13 +161,11 @@ if __name__ == "__main__":
     import models.qwen2
 
     strategy_obj = config.train.strategy
-    teacher_strategy_obj = config.train.strategy
     if 'fsdp' in config.train.strategy:
         from torch.distributed.fsdp.wrap import size_based_auto_wrap_policy
         auto_wrap_policy = size_based_auto_wrap_policy
         activation_checkpointing_policy = { models.qwen2.Qwen2DecoderLayer }
 
-        teacher_strategy_obj = FSDPStrategy(auto_wrap_policy=auto_wrap_policy, sync_module_states=True)
         strategy_obj = FSDPStrategy(auto_wrap_policy=auto_wrap_policy, activation_checkpointing_policy=activation_checkpointing_policy, sync_module_states=True)
 
     qwen_cfg = {
@@ -196,22 +194,9 @@ if __name__ == "__main__":
     }
 
     teacher = None
-    teacher_wrapper = None
     if config.train.train_stage > 1:
         teacher_config = config.train.teacher
         if teacher_config is not None and teacher_config.path != '':
-            teacher_trainer = Trainer(
-                use_distributed_sampler=False, 
-                num_sanity_val_steps=0,
-                logger=False,
-
-                accelerator=config.train.accelerator, 
-                strategy=teacher_strategy_obj, 
-                devices=config.train.devices, 
-                num_nodes=config.train.num_nodes, 
-                precision=config.train.precision,
-            )
-
             classname = teacher_config.model.classname
             if classname != '':
                 teacher_classpath = f'models.{classname}.Model_{classname}'
@@ -224,11 +209,12 @@ if __name__ == "__main__":
                 teacher = Qwen2ForCausalLM(Qwen2Config(rwkv='rwkv' in teacher_config.model.tmix, **qwen_cfg), teacher_config)
             else:
                 teacher = Transformer(teacher_config)
-            teacher_wrapper = LightningModelWrapper(teacher, config)
-            #create_initialized_lightning_trainer_for_inference(teacher_trainer, teacher_wrapper)
-            teacher_trainer.predict(teacher_wrapper, dataloaders=DataLoader(TensorDataset(torch.zeros(1,dtype=torch.long))))
+
+            if hasattr(teacher, 'configure_model'):
+                teacher.configure_model()
+
             teacher.eval()
-            teacher.requires_grad_(False)
+            teacher.requires_grad_(False)            
 
     #with trainer.init_module(empty_init=not config.train.load_partial):
     if True:
@@ -244,10 +230,7 @@ if __name__ == "__main__":
             model = Qwen2ForCausalLM(Qwen2Config(rwkv='rwkv' in config.model.tmix, **qwen_cfg), config)
         else:
             model = Transformer(config)
-        # # FIXME - hacked in weight tying [this messed everything up!]
-        # if (classname.startswith('qwen2') or config.model.tmix.startswith('qwen2')) and config.model.n_embd < 3584:
-        #     model.lm_head.weight = model.model.embed_tokens.weight
-                            
+
     if config.train.train_stage == 1:  # should we build the initial weights?
         if classname != '' or config.model.tmix.startswith("qwen2"):
             model.configure_model()
@@ -289,7 +272,7 @@ if __name__ == "__main__":
         #        teacher = torch.jit.script(teacher)
 
     #with trainer.init_module(empty_init=not config.train.load_partial):
-    wrapper = LightningModelWrapper(model, config) # delay setting the teacher until after init so deepspeed_stage_3 doesn't break it
+    wrapper = LightningModelWrapper(model, config, teacher) # delay setting the teacher until after init so deepspeed_stage_3 doesn't break it
        
     # FIXME - why use_distributed_sampler=False? was this an oversight in the original repo? is this related to replace_sampler_ddp from Bo's code?
     trainer = Trainer(
@@ -304,7 +287,7 @@ if __name__ == "__main__":
                         devices=config.train.devices, 
                         num_nodes=config.train.num_nodes, 
                         precision=config.train.precision,
-                        callbacks=[train_callback(config, teacher_wrapper)], 
+                        callbacks=[train_callback(config)], 
                         check_val_every_n_epoch=config.train.check_val_every_n_epoch, 
                         log_every_n_steps=config.train.log_every_n_steps, 
                         accumulate_grad_batches=config.train.accumulate_grad_batches, 

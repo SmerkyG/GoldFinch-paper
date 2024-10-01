@@ -50,17 +50,13 @@ class L2Wrap(torch.autograd.Function):
         return (grad_output, gy)
 
 class LightningModelWrapper(pl.LightningModule):
-    def __init__(self, model:nn.Module, config:TrainerCLI_Config):
+    def __init__(self, model:nn.Module, config:TrainerCLI_Config, teacher:nn.Module|None=None):
         super().__init__()
         self.model = model
         self.config = config
-        self.teacher = None # delay setting this so ds3 works properly
+        self.teacher = teacher
         self.metrics = dict(loss=metrics.Loss(), acc=metrics.Accuracy())
         self.configured = False
-
-        if 'fsdp' in self.config.train.strategy:
-            self.configure_model()
-
 
     def configure_model(self):
         if self.configured:
@@ -157,12 +153,20 @@ class LightningModelWrapper(pl.LightningModule):
     def load_weights(self):
         config = self.config
         ckpt_path = config.train.load_model
-        if ckpt_path == '':
-            return
+        if ckpt_path != '':
+            self.load_model_weights(self.model, ckpt_path)
+        
+        if self.teacher is not None and config.train.teacher is not None:
+           teacher_ckpt_path = config.train.teacher.path
+           if teacher_ckpt_path != '':
+               self.load_model_weights(self.teacher, teacher_ckpt_path)
 
-        #if 'fsdp' in config.train.strategy:
-        #    if self.trainer.local_rank != 0:
-        #        return
+    def load_model_weights(self, model, ckpt_path):
+        config = self.config
+
+        if 'fsdp' in config.train.strategy:
+            if self.trainer.local_rank != 0:
+                return
 
         print("Loading ", ckpt_path)       
         if 'deepspeed_stage_3' in config.train.strategy and deepspeed.comm.get_rank() != 0:
@@ -171,7 +175,7 @@ class LightningModelWrapper(pl.LightningModule):
             if ckpt_path.lower().endswith('.safetensors'):
                 load_dict = load_file(ckpt_path, device='cpu')
             else:
-                load_dict = torch.load(ckpt_path, map_location='cpu')
+                load_dict = torch.load(ckpt_path, map_location='cpu', weights_only=True)
                 
             # FIXME - this provides copies of tied weights, which isn't desirable for all models or when we want them to actually be tied
             if 'lm_head.weight' not in load_dict:
@@ -184,17 +188,21 @@ class LightningModelWrapper(pl.LightningModule):
                     if '.self_attn.' in k:
                         load_dict[k.replace('self_attn', 'teacher_attn')] = load_dict[k]                            
 
-        strict = not config.train.load_partial
-
-        model = self.model
+        strict = not config.train.load_partial and config.train.attention_distillation_stage != 3
 
         if 'deepspeed_stage_3' not in config.train.strategy:
             model.load_state_dict(load_dict, strict=strict)
+            print("Loaded ", ckpt_path)       
             return
 
-        #with deepspeed.zero.GatheredParameters(list(model.parameters()), modifier_rank=0):
-        #    if deepspeed.comm.get_rank() == 0:
-        #        model.load_state_dict(load_dict, strict=False)
+        # # simple version that takes a lot more CPU RAM
+        # self.trainer.strategy.model_to_device()
+        # with deepspeed.zero.GatheredParameters(list(model.parameters()), modifier_rank=0):
+        #     if deepspeed.comm.get_rank() == 0:
+        #         model.load_state_dict(load_dict, strict=False)
+
+        # print("Loaded ", ckpt_path)       
+        # return
 
         # see https://github.com/microsoft/DeepSpeed/blob/8cded575a94e296fee751072e862304676c95316/deepspeed/runtime/zero/partition_parameters.py#L2172
         # see trainer.strategy.load_model_state_dict https://lightning.ai/docs/pytorch/stable/_modules/lightning/pytorch/strategies/deepspeed.html
@@ -250,183 +258,21 @@ class LightningModelWrapper(pl.LightningModule):
                     load(child, prefix + name + ".")
 
         load(model, prefix="")
-
-    def load_weights_old(self):
-        # FIXME - allow loading from sharded model so we use less CPU RAM and don't require conversion from safetensors
-
-        ds3 = False
-        if self.config.train is not None:
-            if self.config.train.strategy == 'deepspeed_stage_3':
-                ds3 = True
-
-        # Load the model only on the master process (rank 0)
-        if self.global_rank == 0 or not ds3:
-            print("LIGHTNING RANK 0 = PYTORCH RANK", dist.get_rank())
-            ckpt_path = self.config.train.load_model
-            print("Loading ", ckpt_path, "on rank", self.global_rank)
-            if ckpt_path.lower().endswith('.safetensors'):
-                load_dict = load_file(ckpt_path, device='cpu')
-            else:
-                load_dict = torch.load(ckpt_path, map_location='cpu')
-                
-            # FIXME - this provides copies of tied weights, which isn't desirable for all models or when we want them to actually be tied
-            if 'lm_head.weight' not in load_dict:
-                load_dict['lm_head.weight'] = load_dict['model.embed_tokens.weight']
-                
-            # FIXME - this gives the inline teacher the copies it needs of the self_attn weights
-            if self.config.train.attention_distillation_stage == 1:
-                keys = list(load_dict.keys())
-                for k in keys:
-                    if '.self_attn.' in k:
-                        load_dict[k.replace('self_attn', 'teacher_attn')] = load_dict[k]                            
-                        
-            for k in load_dict.keys():
-                if k.startswith('_forward_module.'):
-                    load_dict[k.replace('_forward_module.','')] = load_dict[k]
-                    del load_dict[k]
-    
-            print("Loaded model on rank", self.local_rank)
-            for n in load_dict:
-                shape = load_dict[n].shape
-                shape = [i for i in shape if i != 1]
-                if len(shape) > 2:
-                    print(f"{str(shape[0]).ljust(5)} {str(shape[1]).ljust(5)} {str(shape[2]).ljust(5)} {n}")
-                elif len(shape) > 1:
-                    print(f"{str(shape[0]).ljust(5)} {str(shape[1]).ljust(5)}       {n}")
-                else:
-                    print(f"{str(shape[0]).ljust(5)}             {n}")
-
-            if not ds3:
-                self.model.load_state_dict(load_dict, strict = not self.config.train.load_partial)
-                del load_dict
-                return
-        else:
-            load_dict = {}
-
-        # Create a list to hold sizes for broadcast
-        size_list = []
-        
-        # Prepare sizes list on rank 0
-        if self.global_rank == 0:
-            for k, v in load_dict.items():
-                size_list.append((k, v.shape))
-            
-            # Pickle the size_list
-            pickled_size_list = pickle.dumps(size_list)
-        else:
-            pickled_size_list = None
-        
-        dist.barrier()
-        
-        # Broadcast the pickled size_list from rank 0 to all other ranks
-        pickled_size_list = self.trainer.strategy.broadcast(pickled_size_list, src=0)
-        
-        # Unpickle the size_list on all ranks
-        size_list = pickle.loads(pickled_size_list)
-        
-        #print("Broadcasted tensor sizes list length:", len(size_list), "rank:", self.trainer.global_rank)
-        
-
-        size_dict = {}
-        # Update load_dict on non-master ranks using the received sizes
-        for item in size_list:
-            size_dict[item[0]] = item[1]
-
-        #print("Broadcasted tensor sizes length:", len(size_dict), "rank:", self.global_rank)
-        sorted_keys = sorted(size_dict.keys())
-
-        updated = 0
-        count = 0
-        print("\n" * 10)
-        # Synchronize and broadcast the load_dict to all processes
-        if self.global_rank == 0:
-            print(f"Progress: - | -                              ", end="\r", flush=True)
-        for name in sorted_keys:        
-            if self.global_rank == 0:
-                count += 1
-                progress = f"{count}/{len(size_dict)}"
-                print(f"Progress: {progress} | Sending name: {name}                              ", end="\r", flush=True)
-                # Ensure all ranks have the tensor to be broadcasted
-                tensor = load_dict[name].bfloat16().to(self.device)
-            else:
-                tensor = torch.zeros(size_dict[name], dtype=torch.bfloat16).to(self.device)
-                tensor.view(-1)[0] = -torch.inf # have to set this for some really strange reason but pytorch broadcast is so much faster
-
-                
-            #tensor = self.trainer.strategy.broadcast(tensor, src=0)
-            dist.broadcast(tensor, src=0)
-            
-
-            if tensor.shape != size_dict[name] or torch.sum(tensor) == -torch.inf:
-                print(tensor)
-                print("The broadcast failed for name: ", name)
-                
-            tensor = tensor.to(torch.bfloat16)
-            tensor = tensor.to(self.device)
-
-            #tensor = pickle.loads(tensor_pickle)
-                
-            
-            #print(tensor.shape, name, self.global_rank)
-            #self.configure_model()
-
-            # idk why it needs to be loaded this way, but the other way below doesn't work so idk
-            for n, p in self.named_parameters():
-                if n == name:
-                    #if p.shape == tensor.shape:
-                    
-                    if self.global_rank == 0:
-                        print("Setting param")
-                        
-                    safe_set_full_fp32_param(p, tensor)
-                    
-                    if self.global_rank == 0:
-                        print("Set param")
-                    #safe_set_local_fp32_param(p, tensor.to(self.device))
-                    updated += 1
-                    break
-
-            #if name in state_dict.keys():# and state_dict[name].shape == tensor.shape:
-            #    safe_set_full_fp32_param(state_dict[name], tensor.to(self.device))
-            #    updated += 1
-
-            #print(self.global_rank, name, tensor.shape)
-                    
-            #p = self.state_dict()[name]
-            #safe_set_full_fp32_param(p, tensor.cuda(self.local_rank))
-            
-            tensor = tensor.detach()
-            del tensor
-            torch.cuda.empty_cache()
-        dist.barrier()
-        
-        print("\nUpdated", updated, "keys on", self.global_rank)
-
-        tensor_diff_count = 0
-
-        for n, p in self.named_parameters():
-            if not torch.all(p == 0):
-                tensor_diff_count += 1
-
-        print("Non zero tensors rank", self.global_rank, "-", tensor_diff_count) 
-
-        del load_dict
-        torch.cuda.empty_cache()
-        # Optionally handle partial loading of model parameters
-        # Need to sort this out as it no longer works with the new distributed loading process.
-        #if self.args.load_partial == 1:
-        #    model_state_dict = self.state_dict()
-        #    for k in model_state_dict:
-        #        if k not in new_load_dict:
-        #            new_load_dict[k] = model_state_dict[k].cuda(self.local_rank)
+        print("Loaded ", ckpt_path)       
 
     def forward(self, idx, last_model_state:ModelState|None = None):
         return self.model.forward(idx, last_model_state)
     
     def configure_optimizers(self):
+        # what the heck, we had to do this before the optimizers are loaded or the loaded weights wouldn't 'take' into the optimizer!!!
+        if 'deepspeed_stage_3' in self.config.train.strategy:
+            self.load_weights()
+
         train_config = self.config.train
-        
+
         optim_groups = self.model.get_optim_groups()
+
+        print("Configuring optimizers!!!")
 
         betas = (train_config.beta1, train_config.beta2)
         if self.deepspeed_offload:
@@ -505,6 +351,12 @@ class LightningModelWrapper(pl.LightningModule):
             training_loss = distillation_loss * self.config.train.teacher.kl_weight
             if self.config.train.teacher.ce_weight > 0:
                 training_loss = training_loss + reported_loss * self.config.train.teacher.ce_weight
+
+        if reported_loss.isinf().any():
+            raise Exception("reported loss was infinite")
+
+        if reported_loss.isnan().any():
+            raise Exception("reported loss was NaN")
 
         if training_loss.isinf().any():
             raise Exception("loss was infinite")
