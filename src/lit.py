@@ -89,8 +89,9 @@ class LightningModelWrapper(pl.LightningModule):
             #self.model.clip_grad_norm_(gradient_clip_val)
             #self.clip_grad_by_norm(optimizer, clip_val)
             #self.clip_gradients(optimizer, gradient_clip_val, gradient_clip_algorithm)
-            if gradient_clip_algorithm == 'norm':
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), gradient_clip_val)
+            #if gradient_clip_algorithm == 'norm':
+                #torch.nn.utils.clip_grad_norm_(self.model.parameters(), gradient_clip_val)
+            self.trainer.strategy.model.clip_grad_norm_(gradient_clip_val) #self.config.train.gradient_clip_val)
         else:
             self.clip_gradients(optimizer, gradient_clip_val=gradient_clip_val, gradient_clip_algorithm=gradient_clip_algorithm)
 
