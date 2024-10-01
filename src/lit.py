@@ -165,21 +165,24 @@ class LightningModelWrapper(pl.LightningModule):
         #        return
 
         print("Loading ", ckpt_path)       
-        if ckpt_path.lower().endswith('.safetensors'):
-            load_dict = load_file(ckpt_path, device='cpu')
+        if 'deepspeed_stage_3' in config.train.strategy and deepspeed.comm.get_rank() != 0:
+            load_dict = None
         else:
-            load_dict = torch.load(ckpt_path, map_location='cpu')
-            
-        # FIXME - this provides copies of tied weights, which isn't desirable for all models or when we want them to actually be tied
-        if 'lm_head.weight' not in load_dict:
-            load_dict['lm_head.weight'] = load_dict['model.embed_tokens.weight']
-            
-        # FIXME - this gives the inline teacher the copies it needs of the self_attn weights
-        if config.train.attention_distillation_stage == 1:
-            keys = list(load_dict.keys())
-            for k in keys:
-                if '.self_attn.' in k:
-                    load_dict[k.replace('self_attn', 'teacher_attn')] = load_dict[k]                            
+            if ckpt_path.lower().endswith('.safetensors'):
+                load_dict = load_file(ckpt_path, device='cpu')
+            else:
+                load_dict = torch.load(ckpt_path, map_location='cpu')
+                
+            # FIXME - this provides copies of tied weights, which isn't desirable for all models or when we want them to actually be tied
+            if 'lm_head.weight' not in load_dict:
+                load_dict['lm_head.weight'] = load_dict['model.embed_tokens.weight']
+                
+            # FIXME - this gives the inline teacher the copies it needs of the self_attn weights
+            if config.train.attention_distillation_stage == 1:
+                keys = list(load_dict.keys())
+                for k in keys:
+                    if '.self_attn.' in k:
+                        load_dict[k.replace('self_attn', 'teacher_attn')] = load_dict[k]                            
 
         strict = not config.train.load_partial
 
@@ -208,23 +211,27 @@ class LightningModelWrapper(pl.LightningModule):
         #assert self.lightning_module is not None
 
         def load(module: torch.nn.Module, prefix: str = "") -> None:
-            print("loading prefix", prefix)
-            missing_keys = []
-            unexpected_keys = []
-            error_msgs = []
-
-            # copy state_dict so _load_from_state_dict can modify it
-            metadata = getattr(load_dict, "_metadata", None)
-            state_dict = load_dict.copy()
-            if metadata is not None:
-                state_dict._metadata = metadata
-
-            local_metadata = {} if metadata is None else metadata.get(prefix[:-1], {})
             # because zero3 puts placeholders in model params, this context
             # manager gathers (unpartitions) the params of the current layer, then loads from
             # the state dict and then re-partitions them again
             with deepspeed.zero.GatheredParameters(list(module.parameters(recurse=False)), modifier_rank=0):
                 if deepspeed.comm.get_rank() == 0:
+                    print("loading prefix", prefix)
+                    missing_keys = []
+                    unexpected_keys = []
+                    error_msgs = []
+
+                    # copy state_dict so _load_from_state_dict can modify it
+                    metadata = getattr(load_dict, "_metadata", None)
+                    state_dict = load_dict.copy()
+                    if metadata is not None:
+                        state_dict._metadata = metadata
+
+                    local_metadata = {} if metadata is None else metadata.get(prefix[:-1], {})
+                
+                    for n, p in module.named_parameters(recurse=False):
+                        nn = prefix + n
+                        print(nn, nn in state_dict)
                     module._load_from_state_dict(
                         state_dict=state_dict,
                         prefix=prefix,
