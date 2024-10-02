@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from configs import parse_cmdline_configs, TrainerCLI_Config, Model_Config, Runtime_Config, Config
 import logging
+from functools import partial
 
 logging.basicConfig(level=logging.INFO)
 
@@ -163,7 +164,7 @@ if __name__ == "__main__":
     strategy_obj = config.train.strategy
     if 'fsdp' in config.train.strategy:
         from torch.distributed.fsdp.wrap import size_based_auto_wrap_policy
-        auto_wrap_policy = size_based_auto_wrap_policy
+        auto_wrap_policy = partial(size_based_auto_wrap_policy, min_num_params=int(1e6))
         activation_checkpointing_policy = { models.qwen2.Qwen2DecoderLayer }
 
         strategy_obj = FSDPStrategy(auto_wrap_policy=auto_wrap_policy, activation_checkpointing_policy=activation_checkpointing_policy, sync_module_states=True)

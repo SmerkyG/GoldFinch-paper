@@ -279,6 +279,12 @@ class LightningModelWrapper(pl.LightningModule):
         print("Configuring optimizers!!!")
 
         betas = (train_config.beta1, train_config.beta2)
+        if train_config.optimizer == 'adam8bit':
+            import bitsandbytes as bnb
+            return bnb.optim.Adam(optim_groups, train_config.lr_init, betas, optim_bits=8, percentile_clipping=5)
+        if train_config.optimizer == 'lion':
+            from src.lion import Lion
+            return Lion(optim_groups, train_config.lr_init, betas)
         if self.deepspeed_offload:
             return DeepSpeedCPUAdam(optim_groups, lr=train_config.lr_init, betas=betas, eps=train_config.adam_eps, bias_correction=True, adamw_mode=True, amsgrad=False)
         return FusedAdam(optim_groups, lr=train_config.lr_init, betas=betas, eps=train_config.adam_eps, bias_correction=True, adam_w_mode=True, amsgrad=False)
@@ -338,6 +344,7 @@ class LightningModelWrapper(pl.LightningModule):
             preds = logits.argmax(dim=-1)
 
         if self.training and self.teacher is not None:
+            self.teacher.eval()
             with torch.no_grad():
                 teacher_results = self.teacher.forward(x)
                 if isinstance(teacher_results, tuple):

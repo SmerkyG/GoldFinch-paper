@@ -105,6 +105,8 @@ class Train_Config:
     grad_cp:int = 0
     gradient_clip_val:float = 1.0
 
+    optimizer:str = 'adamw'
+
     weight_decay:float = 0.0
     weight_decay_final:float = -1.0
 
