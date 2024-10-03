@@ -36,23 +36,27 @@ def exists(val):
 def apply_chunked(fn, chunk_size, *args):
     n = args[0].numel()
     for begin in range(0, n, chunk_size):
-        fn(*[arg.view(n)[begin:begin+chunk_size] if isinstance(arg, torch.Tensor) else arg for arg in args])
+        fn(*[arg.view(n)[begin:begin+chunk_size] if isinstance(arg, torch.Tensor) and arg.numel() > 1 else arg for arg in args])
 
 # update functions
 
-def update_fn(p, grad, exp_avg, lr, wd, beta1, beta2):
+def update_fn(p, grad, scaled_exp_avg, exp_avg_abs_max, fp16_multiplier, lr, wd, beta1, beta2):
     # stepweight decay
 
     p.mul_(1 - lr * wd)
 
     # weight update
 
-    update = exp_avg.clone().float().mul_(beta1).add_(grad, alpha = 1 - beta1).sign_()
+    grad = grad * fp16_multiplier
+
+    update = scaled_exp_avg.clone().float().mul_(beta1 / exp_avg_abs_max).add_(grad, alpha = 1 - beta1).sign_()
     p.add_(update, alpha = -lr)
 
     # decay the momentum running average coefficient
 
-    exp_avg.copy_(exp_avg.clone().float().mul_(beta2).add_(grad, alpha = 1 - beta2))
+    new_normalized_exp_avg = scaled_exp_avg.clone().float().mul_(beta2 / exp_avg_abs_max).add_(grad, alpha = 1 - beta2)
+    scaled_exp_avg.copy_(new_normalized_exp_avg.mul_(exp_avg_abs_max))
+
 
 # class
 
@@ -63,7 +67,8 @@ class Lion(Optimizer):
         lr: float = 1e-4,
         betas: Tuple[float, float] = (0.9, 0.99),
         weight_decay: float = 0.0,
-        use_triton: bool = False
+        use_triton: bool = False,
+        use_fp16: bool = False,
     ):
         assert lr > 0.
         assert all([0. <= beta <= 1. for beta in betas])
@@ -71,7 +76,8 @@ class Lion(Optimizer):
         defaults = dict(
             lr = lr,
             betas = betas,
-            weight_decay = weight_decay
+            weight_decay = weight_decay,
+            use_fp16 = use_fp16
         )
 
         super().__init__(params, defaults)
@@ -96,25 +102,37 @@ class Lion(Optimizer):
         for group in self.param_groups:
             for p in filter(lambda p: exists(p.grad), group['params']):
 
-                grad, lr, wd, beta1, beta2, state = p.grad, group['lr'], group['weight_decay'], *group['betas'], self.state[p]
+                grad, lr, wd, beta1, beta2, use_fp16, state = p.grad, group['lr'], group['weight_decay'], *group['betas'], group['use_fp16'], self.state[p]
 
                 # init state - exponential moving average of gradient values
 
-                if len(state) == 0:
-                    state['exp_avg'] = torch.zeros(p.shape, dtype=torch.float32, device=p.device)
+                use_fp16 = use_fp16 and max(p.shape) <= 32768
+                fp16_multiplier = 32768.0 if use_fp16 else 1.0
 
-                exp_avg = state['exp_avg']
+                if len(state) == 0:
+                    state['exp_avg'] = torch.zeros(p.shape, dtype=torch.float32 if not use_fp16 else torch.float16, device=p.device)
+                    state['exp_avg_abs_max'] = 1.0
+
+                scaled_exp_avg = state['exp_avg']
+                exp_avg_abs_max = state['exp_avg_abs_max']
 
                 apply_chunked(
                     self.update_fn,
                     64*1024*1024,
                     p,
                     grad,
-                    exp_avg,
+                    scaled_exp_avg,
+                    exp_avg_abs_max,
+                    fp16_multiplier,
                     lr,
                     wd,
                     beta1,
                     beta2
                 )
+
+                if use_fp16:
+                    normalized_exp_avg = scaled_exp_avg.clone().float().mul_(exp_avg_abs_max / fp16_multiplier)
+                    state['exp_avg_abs_max'] = new_exp_avg_abs_max = normalized_exp_avg.abs().max()
+                    state['exp_avg'] = scaled_exp_avg.clone().float() * exp_avg_abs_max / new_exp_avg_abs_max
 
         return loss

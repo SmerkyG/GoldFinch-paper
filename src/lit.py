@@ -282,9 +282,12 @@ class LightningModelWrapper(pl.LightningModule):
         if train_config.optimizer == 'adam8bit':
             import bitsandbytes as bnb
             return bnb.optim.Adam(optim_groups, train_config.lr_init, betas, optim_bits=8, percentile_clipping=5)
-        if train_config.optimizer == 'lion':
+        if train_config.optimizer == 'lion8bit':
+            import bitsandbytes as bnb
+            return bnb.optim.Lion(optim_groups, train_config.lr_init, betas, optim_bits=8, percentile_clipping=5)
+        if train_config.optimizer == 'lion' or train_config.optimizer == 'lionfp16':
             from src.optimizers.lion import Lion
-            return Lion(optim_groups, train_config.lr_init, betas)
+            return Lion(optim_groups, train_config.lr_init, betas, use_fp16=train_config.optimizer == 'lionfp16')
         if self.deepspeed_offload:
             return DeepSpeedCPUAdam(optim_groups, lr=train_config.lr_init, betas=betas, eps=train_config.adam_eps, bias_correction=True, adamw_mode=True, amsgrad=False)
         return FusedAdam(optim_groups, lr=train_config.lr_init, betas=betas, eps=train_config.adam_eps, bias_correction=True, adam_w_mode=True, amsgrad=False)
