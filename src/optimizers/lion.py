@@ -33,6 +33,15 @@ from torch.optim.optimizer import Optimizer
 def exists(val):
     return val is not None
 
+def apply_chunked(fn, chunk_size, p, *args):
+    p = p.flatten()
+    args = [arg.flatten() if isinstance(arg, torch.Tensor) else arg for arg in args]
+
+    for begin in range(0, p.numel() // chunk_size, chunk_size):
+        end = min(p.numel(), begin + chunk_size)
+        args2 = [arg[begin:end] if isinstance(arg, torch.Tensor) else arg for arg in args]
+        fn(p[begin:end], *args2)
+
 # update functions
 
 def update_fn(p, grad, exp_avg, lr, wd, beta1, beta2):
@@ -99,8 +108,9 @@ class Lion(Optimizer):
                     state['exp_avg'] = torch.zeros(p.shape, dtype=torch.bfloat16, device=p.device)
 
                 exp_avg = state['exp_avg']
-
-                self.update_fn(
+                apply_chunked(
+                    self.update_fn,
+                    1024*1024,
                     p,
                     grad,
                     exp_avg,
