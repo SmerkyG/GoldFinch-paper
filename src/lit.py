@@ -283,7 +283,7 @@ class LightningModelWrapper(pl.LightningModule):
             import bitsandbytes as bnb
             return bnb.optim.Adam(optim_groups, train_config.lr_init, betas, optim_bits=8, percentile_clipping=5)
         if train_config.optimizer == 'lion':
-            from src.lion import Lion
+            from src.optimizers.lion import Lion
             return Lion(optim_groups, train_config.lr_init, betas)
         if self.deepspeed_offload:
             return DeepSpeedCPUAdam(optim_groups, lr=train_config.lr_init, betas=betas, eps=train_config.adam_eps, bias_correction=True, adamw_mode=True, amsgrad=False)
