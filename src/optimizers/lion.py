@@ -40,7 +40,7 @@ def apply_chunked(fn, chunk_size, *args):
 
 # update functions
 
-def update_fn(p, grad, scaled_exp_avg, exp_avg_abs_max, fp16_multiplier, lr, wd, beta1, beta2):
+def update_fn(p, grad, scaled_exp_avg, fp16_multiplier, lr, wd, beta1, beta2):
     # stepweight decay
 
     p.mul_(1 - lr * wd)
@@ -49,13 +49,13 @@ def update_fn(p, grad, scaled_exp_avg, exp_avg_abs_max, fp16_multiplier, lr, wd,
 
     grad = grad * fp16_multiplier
 
-    update = scaled_exp_avg.clone().float().mul_(beta1 / exp_avg_abs_max).add_(grad, alpha = 1 - beta1).sign_()
+    update = scaled_exp_avg.clone().float().mul_(beta1).add_(grad, alpha = 1 - beta1).sign_()
     p.add_(update, alpha = -lr)
 
     # decay the momentum running average coefficient
 
-    new_normalized_exp_avg = scaled_exp_avg.clone().float().mul_(beta2 / exp_avg_abs_max).add_(grad, alpha = 1 - beta2)
-    scaled_exp_avg.copy_(new_normalized_exp_avg.mul_(exp_avg_abs_max))
+    new_exp_avg = scaled_exp_avg.clone().float().mul_(beta2).add_(grad, alpha = 1 - beta2)
+    scaled_exp_avg.copy_(new_exp_avg)
 
 
 # class
@@ -106,15 +106,12 @@ class Lion(Optimizer):
 
                 # init state - exponential moving average of gradient values
 
-                use_fp16 = use_fp16 and max(p.shape) <= 32768
                 fp16_multiplier = 32768.0 if use_fp16 else 1.0
 
                 if len(state) == 0:
-                    state['exp_avg'] = torch.zeros(p.shape, dtype=torch.float32 if not use_fp16 else torch.float16, device=p.device)
-                    state['exp_avg_abs_max'] = 1.0
+                    state['exp_avg'] = torch.zeros(p.shape, dtype=torch.float16 if use_fp16 else p.dtype, device=p.device)
 
                 scaled_exp_avg = state['exp_avg']
-                exp_avg_abs_max = state['exp_avg_abs_max']
 
                 apply_chunked(
                     self.update_fn,
@@ -122,17 +119,11 @@ class Lion(Optimizer):
                     p,
                     grad,
                     scaled_exp_avg,
-                    exp_avg_abs_max,
                     fp16_multiplier,
                     lr,
                     wd,
                     beta1,
                     beta2
                 )
-
-                if use_fp16:
-                    normalized_exp_avg = scaled_exp_avg.clone().float().mul_(exp_avg_abs_max / fp16_multiplier)
-                    state['exp_avg_abs_max'] = new_exp_avg_abs_max = normalized_exp_avg.abs().max()
-                    state['exp_avg'] = scaled_exp_avg.clone().float() * exp_avg_abs_max / new_exp_avg_abs_max
 
         return loss
