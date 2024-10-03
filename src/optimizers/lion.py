@@ -33,25 +33,21 @@ from torch.optim.optimizer import Optimizer
 def exists(val):
     return val is not None
 
-def apply_chunked(fn, chunk_size, p, *args):
-    p = p.flatten()
-    args = [arg.flatten() if isinstance(arg, torch.Tensor) else arg for arg in args]
-
-    for begin in range(0, p.numel() // chunk_size, chunk_size):
-        end = min(p.numel(), begin + chunk_size)
-        args2 = [arg[begin:end] if isinstance(arg, torch.Tensor) else arg for arg in args]
-        fn(p[begin:end], *args2)
+def apply_chunked(fn, chunk_size, *args):
+    n = args[0].numel()
+    for begin in range(0, n, chunk_size):
+        fn(*[arg.view(n)[begin:begin+chunk_size] if isinstance(arg, torch.Tensor) else arg for arg in args])
 
 # update functions
 
 def update_fn(p, grad, exp_avg, lr, wd, beta1, beta2):
     # stepweight decay
 
-    p.data.mul_(1 - lr * wd)
+    p.mul_(1 - lr * wd)
 
     # weight update
 
-    update = exp_avg.clone().float().mul_(beta1).add(grad, alpha = 1 - beta1).sign_()
+    update = exp_avg.clone().float().mul_(beta1).add_(grad, alpha = 1 - beta1).sign_()
     p.add_(update, alpha = -lr)
 
     # decay the momentum running average coefficient
@@ -105,12 +101,13 @@ class Lion(Optimizer):
                 # init state - exponential moving average of gradient values
 
                 if len(state) == 0:
-                    state['exp_avg'] = torch.zeros(p.shape, dtype=torch.bfloat16, device=p.device)
+                    state['exp_avg'] = torch.zeros(p.shape, dtype=torch.float32, device=p.device)
 
                 exp_avg = state['exp_avg']
+
                 apply_chunked(
                     self.update_fn,
-                    1024*1024,
+                    64*1024*1024,
                     p,
                     grad,
                     exp_avg,
