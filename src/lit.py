@@ -128,9 +128,6 @@ class LightningModelWrapper(pl.LightningModule):
         elif 'deepspeed_stage_3' not in config.train.strategy:
             save_dict = model.state_dict()
         else:
-            if not self.trainer.is_global_zero:
-                return
-            
             # FIXME - this would save the whole model as well as optimizer state and dataset state
             #self.trainer.save_checkpoint(path, weights_only=True,)
 
@@ -151,7 +148,7 @@ class LightningModelWrapper(pl.LightningModule):
 
             save_dict = save(model)
 
-        if self.trainer.local_rank == 0:
+        if self.trainer.is_global_zero:
             torch.save(save_dict, path)
 
     def load_weights(self):
