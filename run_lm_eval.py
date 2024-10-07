@@ -322,18 +322,6 @@ class EvalHarnessAdapter(TemplateLM):
             ne = min(nb+B, len(requests))
 
             # stack and pad to longest
-            batch = []
-            batch_info = []
-            maxlen = 0
-            for i in range(nb, ne):
-                q = RWKV_PAD + requests[i][1]
-                src = q + requests[i][2]
-                input = torch.tensor(src, dtype=torch.long, device=device, requires_grad=False)
-                batch.append( input )
-                batch_info.append((len(q), len(src)))
-                maxlen = max(maxlen, len(src))
-
-            # stack and pad to longest
             batched_inputs = []
             batch_info = []
             maxlen = 0
