@@ -387,7 +387,7 @@ class EvalHarnessAdapter(TemplateLM):
 if config.seed is None:
     config.seed = 1234 
 
-adapter = EvalHarnessAdapter(batch_size_per_gpu=config.bsz, TokenizerWrapper(pipeline.tokenizer))
+adapter = EvalHarnessAdapter(batch_size_per_gpu=config.bsz, tokenizer=TokenizerWrapper(pipeline.tokenizer))
 with torch.no_grad():
     with torch.amp.autocast(device_type='cuda', dtype=dtype):
 	    results = evaluator.simple_evaluate(
