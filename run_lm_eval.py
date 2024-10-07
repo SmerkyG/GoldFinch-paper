@@ -352,7 +352,7 @@ class EvalHarnessAdapter(TemplateLM):
                 batched_inputs[i] = F.pad(batched_inputs[i], (0, maxlen - batched_inputs[i].size(0)))
             batched_inputs = torch.stack(batched_inputs, dim=0)
 
-            logits, _ = model.forward(batch, None)
+            logits, _ = model.forward(batched_inputs, None)
 
 
             batched_logprobs = F.log_softmax(logits, dim=-1)
