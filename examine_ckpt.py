@@ -18,9 +18,8 @@ if model_path.lower().endswith('.safetensors'):
 else:
     state_dict = torch.load(model_path, map_location='cpu', weights_only=True)
 
-state_dict_keys = list(state_dict.keys())
-for name in state_dict_keys:
-    if state_dict[name].numel() == 0:
-        print(name, state_dict[name].shape)
+for name, p in state_dict.items():
+    if p.numel() == 0:
+        print(name, p.dtype, p.shape)
     else:
-        print(name, state_dict[name].shape, float(state_dict[name].min()), float(state_dict[name].max()))
+        print(name, p.dtype, p.shape, float(p.min()), float(p.max()))
