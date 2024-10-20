@@ -238,7 +238,7 @@ class TMix_qwen2rwkv(TMix_qwen2):
 
         n_layer = config.n_layer
         n_embd = self.hidden_size
-        dim_att = self.hidden_size
+        dim_att = self.num_heads * self.head_dim
         layer_id = self.layer_id
 
         with torch.no_grad():
@@ -591,13 +591,15 @@ class Model_qwen2(nn.Module): # Qwen2CausalLM
                     decoder_layer.self_attn.time_maa_x.requires_grad_(True)
                     decoder_layer.self_attn.time_maa_r.requires_grad_(True)
                     decoder_layer.self_attn.time_maa_k.requires_grad_(True)
-                    #decoder_layer.self_attn.time_maa_w.requires_grad_(True) # FIXME!!! we left this out!
+                    decoder_layer.self_attn.time_maa_w.requires_grad_(True)
                     decoder_layer.self_attn.time_maa_w1.requires_grad_(True)
                     decoder_layer.self_attn.time_maa_w2.requires_grad_(True)
                     decoder_layer.self_attn.time_decay.requires_grad_(True)
                     decoder_layer.self_attn.time_decay_w1.requires_grad_(True)
                     decoder_layer.self_attn.time_decay_w2.requires_grad_(True)
                     # FIXME - wow we removed q, k here by accident and it.. helped??!?!
+                    # decoder_layer.self_attn.q_proj.requires_grad_(True)
+                    # decoder_layer.self_attn.k_proj.requires_grad_(True)
                 elif train_config.attention_distillation_stage == 2:
                     decoder_layer.self_attn.requires_grad_(True)
 
