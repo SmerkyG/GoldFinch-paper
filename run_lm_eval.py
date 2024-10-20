@@ -63,6 +63,9 @@ model_path = config.path
 from src.model import Transformer
 from safetensors.torch import load_file
 
+# avoid 1000 huggingface warnings "huggingface/tokenizers: The current process just got forked, after parallelism has already been used. Disabling parallelism to avoid deadlocks...""
+os.environ['TOKENIZERS_PARALLELISM'] = 'false'
+
 print(f'Loading model - {model_path}')
 classname = config.model.classname
 if config.path.lower().endswith('.safetensors'):
@@ -328,9 +331,9 @@ if config.seed is None:
     config.seed = 1234 
 
 # tokenizer = TokenizerWrapper(pipeline.tokenizer) # RWKV tokenizer
-from transformers import Qwen2Tokenizer, Qwen2TokenizerFast
-tokenizer:transformers.PreTrainedTokenizer = Qwen2Tokenizer.from_pretrained('Qwen/Qwen-tokenizer')
-RWKV_PAD = [tokenizer.bos_token_id]
+from transformers import AutoTokenizer
+tokenizer:transformers.PreTrainedTokenizer = AutoTokenizer.from_pretrained('Qwen/Qwen2-0.5B')
+RWKV_PAD = []
 
 adapter = EvalHarnessAdapter(batch_size_per_gpu=config.bsz, tokenizer=tokenizer)
 with torch.no_grad():
