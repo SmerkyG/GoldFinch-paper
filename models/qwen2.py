@@ -260,9 +260,10 @@ class TMix_qwen2rwkv(TMix_qwen2):
             self.time_maa_k = nn.Parameter(torch.zeros_like(ddd))
             self.time_maa_v = nn.Parameter(torch.zeros_like(ddd))
             self.time_maa_w = nn.Parameter(torch.zeros_like(ddd))
+            self.time_maa_g = nn.Parameter(torch.zeros_like(ddd))
 
             D_MIX_LORA = 32 if n_embd < 4096 else 64
-            self.time_maa_w2 = nn.Parameter(torch.zeros(4, D_MIX_LORA, n_embd).uniform_(-0.01, 0.01))
+            self.time_maa_w2 = nn.Parameter(torch.zeros(5, D_MIX_LORA, n_embd).uniform_(-0.01, 0.01))
             self.time_maa_w1 = nn.Parameter(torch.zeros(n_embd, D_MIX_LORA*self.time_maa_w2.size(0)))
 
             # # per-head RWKV-6
@@ -291,7 +292,12 @@ class TMix_qwen2rwkv(TMix_qwen2):
             #     tmp[n] = ratio_0_to_1 * (1 - (n / (dim_att - 1))) + zigzag
             # self.time_faaaa = nn.Parameter(tmp.reshape(self.n_head, self.head_size))
 
-        self.ln_x = nn.LayerNorm(dim_att)
+        self.gate = nn.Linear(self.hidden_size, self.num_heads * self.head_dim, bias=True)
+        # start gate out with no effect
+        nn.init.zeros_(self.gate.weight)
+        nn.init.ones_(self.gate.bias)
+
+        #self.ln_x = nn.LayerNorm(dim_att)
 
     def segsum(self, w_log): # B H L 1
         w_log_cumsum = torch.cumsum(w_log, dim=-2) # (B, H, L, 1)
@@ -308,18 +314,20 @@ class TMix_qwen2rwkv(TMix_qwen2):
         xxx = torch.tanh(xxx @ self.time_maa_w1).view(bsz*q_len, self.time_maa_w2.size(0), -1).transpose(0, 1)
         xxx = torch.bmm(xxx, self.time_maa_w2).view(self.time_maa_w2.size(0), bsz, q_len, hidden_dim)
 
-        mr, mk, mv, mw = xxx.unbind(dim=0)
+        mr, mk, mv, mw, mg = xxx.unbind(dim=0)
         #mr, mk, mv = xxx.unbind(dim=0)
         xr = x + dxprev * (self.time_maa_r + mr)
         xk = x + dxprev * (self.time_maa_k + mk)
         xv = x + dxprev * (self.time_maa_v + mv)
         xw = x + dxprev * (self.time_maa_w + mw)
+        xg = x + dxprev * (self.time_maa_g + mg)
 
         query_states = self.q_proj(xr)
         key_states = self.k_proj(xk)
         value_states = self.v_proj(xv)
         #decay_states = self.time_decay.view(1,1,H,1).expand(bsz,q_len,H,1).contiguous()
         decay_states = (self.time_decay + torch.tanh(xw @ self.time_decay_w1) @ self.time_decay_w2).to(query_states.dtype)
+        g = F.silu(self.gate(xg))
 
         query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
         key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
@@ -379,8 +387,8 @@ class TMix_qwen2rwkv(TMix_qwen2):
             attn_output = fla_chunk_gla(query_states, key_states, value_states, decay_states_log)[0]
             attn_output = attn_output.transpose(1, 2).contiguous()
             attn_output = attn_output.view(bsz, q_len, self.hidden_size)
-            attn_output = self.ln_x(attn_output)
-            attn_output = self.o_proj(attn_output)
+            #attn_output = self.ln_x(attn_output)
+            attn_output = self.o_proj(attn_output * g)
         else:
             attn_weights = (query_states * (key_states.size(-1) ** -0.5)) @ key_states.mT
 
@@ -653,25 +661,27 @@ class Model_qwen2(nn.Module): # Qwen2CausalLM
 
         return optim_groups    
 
-    def _init_weights(self, module):
-        std = 0.02 #self.config.initializer_range
-        if isinstance(module, nn.Linear):
-            module.weight.data.normal_(mean=0.0, std=std)
-            if module.bias is not None:
-                module.bias.data.zero_()
-        elif isinstance(module, nn.Embedding):
-            module.weight.data.normal_(mean=0.0, std=std)
-            if module.padding_idx is not None:
-                module.weight.data[module.padding_idx].zero_()
+    # def _init_weights(self, module):
+    #     std = 0.02 #self.config.initializer_range
+    #     if isinstance(module, nn.Linear):
+    #         module.weight.data.normal_(mean=0.0, std=std)
+    #         if module.bias is not None:
+    #             module.bias.data.zero_()
+    #     elif isinstance(module, nn.Embedding):
+    #         module.weight.data.normal_(mean=0.0, std=std)
+    #         if module.padding_idx is not None:
+    #             module.weight.data[module.padding_idx].zero_()
 
     def init_all_weights(self):
-        self.apply(self._init_weights)
-        for n, p in self.named_parameters():
-            requires_grad_temp = p.requires_grad
-            p.requires_grad_(False)
-            if n.endswith('.ln_x.weight'):
-                layer_scale = (1+int(n.split('.')[2])) / self.config.model.n_layer
-                print('.ln_x.weight layer', int(n.split('.')[2]), "scale", (layer_scale ** 0.7))
-                p *= 0.0
-                p += (layer_scale ** 0.7)
-            p.requires_grad = requires_grad_temp
+        # FIXME - we really need to init the gate here to identity (zero weights, ones bias) but instead we just won't init weights since they're all grabbed or set anyway
+        pass
+        # self.apply(self._init_weights)
+        # for n, p in self.named_parameters():
+        #     requires_grad_temp = p.requires_grad
+        #     p.requires_grad_(False)
+        #     if n.endswith('.ln_x.weight'):
+        #         layer_scale = (1+int(n.split('.')[2])) / self.config.model.n_layer
+        #         print('.ln_x.weight layer', int(n.split('.')[2]), "scale", (layer_scale ** 0.7))
+        #         p *= 0.0
+        #         p += (layer_scale ** 0.7)
+        #     p.requires_grad = requires_grad_temp
