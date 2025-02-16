@@ -2,7 +2,7 @@ model:
     __type__: configs.Transformer_Config
     tmix: qwen2
     classname: qwen2
-    attention_type: rwkv6
+    attention_type: rwkv7
     ctx_len: 512 # 4096
     vocab_size: 152064
     vocab_padding_idx: 151646 

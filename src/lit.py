@@ -49,12 +49,16 @@ class L2Wrap(torch.autograd.Function):
         gy.scatter_(-1, ids, maxx * factor)
         return (grad_output, gy)
 
+from contextlib import nullcontext
+from accelerate import init_empty_weights as init_on_meta_device
+
 class LightningModelWrapper(pl.LightningModule):
-    def __init__(self, model:nn.Module, config:TrainerCLI_Config, teacher:nn.Module|None=None):
+    def __init__(self, model:nn.Module, config:TrainerCLI_Config, teacher:nn.Module, trainer:pl.Trainer):
         super().__init__()
         self.model = model
         self.config = config
         self.teacher = teacher
+        self.trainer = trainer
         self.metrics = dict(loss=metrics.Loss(), acc=metrics.Accuracy())
         self.configured = False
 
@@ -63,11 +67,33 @@ class LightningModelWrapper(pl.LightningModule):
             return
         self.configured = True
 
+        ctx = nullcontext
+        if 'fsdp' in self.config.train.strategy:
+            ctx = init_on_meta_device
+
+        print("Configuring model on student")
         if hasattr(self.model, 'configure_model'):
-            self.model.configure_model()
+            with ctx():
+                self.model.configure_model()
+
+        if self.teacher is not None:
+            print("Configuring model on teacher")
+            if hasattr(self.teacher, 'configure_model'):
+                with ctx():
+                    self.teacher.configure_model()
+            self.teacher.eval()
+            self.teacher.requires_grad_(False)            
+
+        if 'fsdp' in self.config.train.strategy:
+            if self.trainer.local_rank == 0:
+                print("Moving student to CPU")
+                self.model = self.model.to_empty(device=torch.device('cpu'), recurse=True)
+                print("Moving teacher to CPU")
+                self.teacher = self.teacher.to_empty(device=torch.device('cpu'), recurse=True)
 
         if self.config.train is not None:
             if self.config.train.load_model == '' or (self.config.train.load_partial and self.config.train.attention_distillation_stage != 3):
+                print("Initializing weights")
                 self.init_all_weights()
 
         if 'deepspeed_stage_3' not in self.config.train.strategy:
@@ -199,7 +225,7 @@ class LightningModelWrapper(pl.LightningModule):
                     if '.self_attn.' in k:
                         load_dict[k.replace('self_attn', 'teacher_attn')] = load_dict[k]                            
 
-        strict = not config.train.load_partial and config.train.attention_distillation_stage != 3
+        strict = not config.train.load_partial #and config.train.attention_distillation_stage != 3
 
         if 'deepspeed_stage_3' not in config.train.strategy:
             model.load_state_dict(load_dict, strict=strict)
@@ -375,18 +401,19 @@ class LightningModelWrapper(pl.LightningModule):
         flat_student_logits = logits.view(-1, logits.size(-1))
         flat_labels = y.view(-1)
 
-        chunk_loss_calcs = self.config.train.attention_distillation_stage == 0
-        if not chunk_loss_calcs:
-            reported_loss = training_loss = ce_loss = F.cross_entropy(flat_student_logits, flat_labels)
-        else:
-            # memory saving measure, because otherwise cross_entropy tried to allocate everything all at once
-            chunk_len = 512
-            n_chunks = (flat_student_logits.size(0) + chunk_len - 1) // chunk_len
-            ce_loss = torch.tensor(0.0, device=flat_student_logits.device, dtype=flat_student_logits.dtype)
-            for c in range(0, flat_student_logits.size(0), chunk_len):
-                ce_loss = ce_loss + F.cross_entropy(flat_student_logits[c:c+chunk_len], flat_labels[c:c+chunk_len])
-            ce_loss = ce_loss / n_chunks
-            reported_loss = training_loss = ce_loss
+        chunk_loss_calcs = self.config.train.attention_distillation_stage in (0, 3)
+        chunk_len = 512
+        n_chunks = (flat_student_logits.size(0) + chunk_len - 1) // chunk_len
+        if not self.training or self.teacher is None: # FIXME - also check self.config.train.teacher.ce_weight
+            if not chunk_loss_calcs:
+                reported_loss = training_loss = ce_loss = F.cross_entropy(flat_student_logits, flat_labels)
+            else:
+                # memory saving measure, because otherwise cross_entropy tried to allocate everything all at once
+                ce_loss = torch.tensor(0.0, device=flat_student_logits.device, dtype=flat_student_logits.dtype)
+                for c in range(0, flat_student_logits.size(0), chunk_len):
+                    ce_loss = ce_loss + F.cross_entropy(flat_student_logits[c:c+chunk_len], flat_labels[c:c+chunk_len])
+                ce_loss = ce_loss / n_chunks
+                reported_loss = training_loss = ce_loss
         
         with torch.no_grad():
             preds = logits.argmax(dim=-1)
@@ -424,11 +451,14 @@ class LightningModelWrapper(pl.LightningModule):
                 distillation_loss = distillation_loss / n_chunks
             
             training_loss = distillation_loss * self.config.train.teacher.kl_weight
+
             if self.config.train.teacher.ce_weight > 0:
                 training_loss = training_loss + ce_loss * self.config.train.teacher.ce_weight
-            #reported_loss = training_loss
+            # FIXME - reporting disillation loss, but we can still see accuracy
+            reported_loss = training_loss
             if batch_idx % 10 == 0:
-                print(f"kl_div:{distillation_loss.item()}, ce_loss:{ce_loss.item()}")
+                print(f"training_loss:{training_loss.item()}, reported_loss:{reported_loss.item()}")
+
 
         if reported_loss.isinf().any():
             raise Exception("reported loss was infinite")

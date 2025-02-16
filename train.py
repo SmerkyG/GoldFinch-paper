@@ -6,6 +6,8 @@ from typing import Callable
 
 logging.basicConfig(level=logging.INFO)
 
+from src.logger import print0 as print
+
 if __name__ == "__main__":
     from argparse import ArgumentParser
     from lightning import Trainer
@@ -170,7 +172,10 @@ if __name__ == "__main__":
         auto_wrap_policy = partial(size_based_auto_wrap_policy, min_num_params=int(1e6))
         activation_checkpointing_policy = { models.qwen2.Qwen2DecoderLayer }
 
-        strategy_obj = FSDPStrategy(auto_wrap_policy=auto_wrap_policy, activation_checkpointing_policy=activation_checkpointing_policy, sync_module_states=True)
+        def init_fn(x: torch.nn.Module):
+            return x.to_empty(device=torch.get_default_device(), recurse=False)
+        
+        strategy_obj = FSDPStrategy(auto_wrap_policy=auto_wrap_policy, activation_checkpointing_policy=activation_checkpointing_policy, sync_module_states=True, param_init_fn=init_fn)
 
     qwen_cfg = {
         "attention_dropout": 0.0,
@@ -201,6 +206,7 @@ if __name__ == "__main__":
     if config.train.train_stage > 1:
         teacher_config = config.train.teacher
         if teacher_config is not None and teacher_config.path != '':
+            print("Instantiating teacher")
             hf_path = teacher_config.model.hf_path
             classname = teacher_config.model.classname
             if hf_path != '':
@@ -218,14 +224,9 @@ if __name__ == "__main__":
             else:
                 teacher = Transformer(teacher_config)
 
-            if hasattr(teacher, 'configure_model'):
-                teacher.configure_model()
-
-            teacher.eval()
-            teacher.requires_grad_(False)            
-
     #with trainer.init_module(empty_init=not config.train.load_partial):
     if True:
+        print("Instantiating student")
         attention_distillation_stage = config.train.attention_distillation_stage
         hf_path = config.model.hf_path
         classname = config.model.classname
@@ -280,17 +281,17 @@ if __name__ == "__main__":
                 model.gradient_checkpointing_enable()
 
         if os.getenv("RWKV_TORCH_COMPILE", '0').lower() in ['1', 'true']:
+            print("Compiling student")
             model = torch.compile(model)
             if teacher is not None:
+                print("Compiling teacher")
                 teacher = torch.compile(teacher)
         #elif os.getenv("RWKV_JIT_ON", '1').lower() in ['1', 'true']:
         #    model = torch.jit.script(model)
         #    if teacher is not None:
         #        teacher = torch.jit.script(teacher)
 
-    #with trainer.init_module(empty_init=not config.train.load_partial):
-    wrapper = LightningModelWrapper(model, config, teacher) # delay setting the teacher until after init so deepspeed_stage_3 doesn't break it
-       
+    print("Instantiating trainer")
     # FIXME - why use_distributed_sampler=False? was this an oversight in the original repo? is this related to replace_sampler_ddp from Bo's code?
     trainer = Trainer(
                         use_distributed_sampler=False, 
@@ -315,12 +316,18 @@ if __name__ == "__main__":
         trainer.strategy.config["zero_optimization"]["allgather_bucket_size"] = config.train.ds_bucket_mb * 1000 * 1000
         trainer.strategy.config["zero_optimization"]["reduce_bucket_size"] = config.train.ds_bucket_mb * 1000 * 1000
 
+    print("Instantiating dataset")
     train_data = MyDataset(config, trainer)
     if config.train.validation_data_file != "":
         validation_data = MMapDataset(config.train.validation_data_file, config.model.ctx_len)
     config.model.vocab_size = train_data.vocab_size
 
+    print("Instantiating wrapper")
+    #with trainer.init_module(empty_init=not config.train.load_partial):
+    wrapper = LightningModelWrapper(model, config, teacher, trainer) # delay setting the teacher until after init so deepspeed_stage_3 doesn't break it
+            
     # must set shuffle=False, persistent_workers=False (because worker is in another thread)
+    print("Instantiating dataloader")
     train_data_loader = DataLoader(train_data, shuffle=False, pin_memory=True, batch_size=config.train.micro_bsz, num_workers=1, persistent_workers=False, drop_last=True)
     validation_data_loader = None
     if config.train.validation_data_file != "":
@@ -329,5 +336,6 @@ if __name__ == "__main__":
     ds_ckpt_path = None
     #if 'deepspeed_stage_3' in config.train.strategy and config.continued:
     #    ds_ckpt_path = config.train.load_model
+    print("Running trainer.fit")
     trainer.fit(wrapper, train_dataloaders=train_data_loader, val_dataloaders=validation_data_loader, ckpt_path=ds_ckpt_path)
 
