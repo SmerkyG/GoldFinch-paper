@@ -628,6 +628,7 @@ class TMix_qwen2rwkv7(TMix_qwen2):
         # time_weight = time_weight[None, None, :]
 
         decay_speed = [
+            #-6.0 + 5.0 * (n / (attention_hidden_size - 1)) ** (0.85 + 0.15 * ratio_0_to_1 ** 0.5)
             -7.0 + 5.0 * (n / (attention_hidden_size - 1)) ** (0.85 + 1.0 * ratio_0_to_1 ** 0.5)
             for n in range(attention_hidden_size)
         ]
@@ -689,10 +690,6 @@ class TMix_qwen2rwkv7(TMix_qwen2):
             # module.key.weight.data.uniform_(-0.05/(C**0.5), 0.05/(attention_hidden_size**0.5))
             # module.value.weight.data.uniform_(-0.5/(C**0.5), 0.5/(attention_hidden_size**0.5))
             # module.output.weight.data.zero_()
-
-    def reset_parameters(self):
-        print("Called reset_parameters on TMix_qwen2rwkv7 layer ", self.layer_idx)
-        # FIXME - do something here?
 
     def forward(self, x, reset_mask, v_first, last_model_state:ModelState, shared:Shared, output_attentions:bool=False):
         last_state = last_model_state.block_states[self.layer_id].time_mix_state
@@ -760,8 +757,9 @@ class TMix_qwen2rwkv7(TMix_qwen2):
         k = k * a
 
         if self.training:
-            log_neglog_w[reset_mask] = 1.0
+            log_neglog_w[reset_mask] = 1.5 # FIXME - 1.5?
             kk[reset_mask] = 0.0
+            #k[reset_mask] = 0.0 # hmm if we have 'eos The cat' do we want to stick something into the state on predicting 'The'?
 
         if self.layer_idx == 0:
             v_first = v
@@ -777,6 +775,9 @@ class TMix_qwen2rwkv7(TMix_qwen2):
         x = self.ln_x(x.view(B * T, H*N)).view(B, T, H*N)
         #x = x + ((r.view(B,T,H,-1)*k.view(B,T,H,-1)*self.r_k).sum(dim=-1, keepdim=True) * v.view(B,T,H,-1)).view(B,T,C)
         x = self.o_proj(x * g)
+
+        if self.training:
+            x[reset_mask] = 0.0
 
         if input_seq_len != T:
             x = x[:, :input_seq_len]
@@ -922,7 +923,7 @@ class Qwen2Decoder(nn.Module):
             token_ids = torch.tensor(token_ids, device=self.embed_tokens.weight.device, dtype=torch.long, requires_grad=False)[None, :]
 
         eos_token_id = 151643 # "<|endoftext|>"
-        reset_mask = F.pad(token_ids == eos_token_id, (1, -1), value=False)
+        reset_mask = token_ids == eos_token_id # state needs to be reset at the beginning of the EOS token processing, since we're predicting the next token based on ZERO state!
 
         x = self.embed_tokens(token_ids)
 
