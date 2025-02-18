@@ -1,5 +1,5 @@
-# model:
-#   attention_type: rwkv7_fla_chunk
+model:
+  attention_type: rwkv7_fla_chunk
 #   ctx_len: 512
 
 train:

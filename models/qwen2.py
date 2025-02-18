@@ -635,8 +635,8 @@ class TMix_qwen2rwkv7(TMix_qwen2):
         # time_weight = time_weight[None, None, :]
 
         decay_speed = [
-            #-6.0 + 5.0 * (n / (attention_hidden_size - 1)) ** (0.85 + 0.15 * ratio_0_to_1 ** 0.5)
-            -7.0 + 5.0 * (n / (attention_hidden_size - 1)) ** (0.85 + 1.0 * ratio_0_to_1 ** 0.5)
+            -6.0 + 5.0 * (n / (attention_hidden_size - 1)) ** (0.85 + 0.15 * ratio_0_to_1 ** 0.5)
+            #-7.0 + 5.0 * (n / (attention_hidden_size - 1)) ** (0.85 + 1.0 * ratio_0_to_1 ** 0.5)
             for n in range(attention_hidden_size)
         ]
         decay_speed = torch.tensor(decay_speed, dtype=module.w0.dtype, device=module.w0.device)
@@ -763,10 +763,10 @@ class TMix_qwen2rwkv7(TMix_qwen2):
         a = (1 + (a-1) * self.k_a)
         k = k * a
 
-        if self.training:
-            log_neglog_w[reset_mask] = 1.5 # FIXME - 1.5?
-            kk[reset_mask] = 0.0
-            #k[reset_mask] = 0.0 # hmm if we have 'eos The cat' do we want to stick something into the state on predicting 'The'?
+        # if self.training and self.config.train.attention_distillation_stage in (1, 2):
+        #     log_neglog_w[reset_mask] = 1.5 # FIXME - 1.5?
+        #     kk[reset_mask] = 0.0
+        #     #k[reset_mask] = 0.0 # hmm if we have 'eos The cat' do we want to stick something into the state on predicting 'The'?
 
         if self.layer_idx == 0:
             v_first = v
@@ -783,8 +783,8 @@ class TMix_qwen2rwkv7(TMix_qwen2):
         #x = x + ((r.view(B,T,H,-1)*k.view(B,T,H,-1)*self.r_k).sum(dim=-1, keepdim=True) * v.view(B,T,H,-1)).view(B,T,C)
         x = self.o_proj(x * g)
 
-        if self.training:
-            x[reset_mask] = 0.0
+        # if self.training and self.config.train.attention_distillation_stage not in (1, 2):
+        #     x[reset_mask] = 0.0
 
         if input_seq_len != T:
             x = x[:, :input_seq_len]
