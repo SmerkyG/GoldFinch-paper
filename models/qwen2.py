@@ -23,32 +23,32 @@ if importlib.util.find_spec('deepspeed'):
 from src.logger import print0 as print
 
 ATTENTION_TYPE = os.environ["RWKV_ATTENTION_TYPE"]
-assert ATTENTION_TYPE in ['rwkv6', 'rwkv7']
-if ATTENTION_TYPE == 'rwkv6':
+if 'rwkv6' in ATTENTION_TYPE:
     from fla.ops.gla.chunk import chunk_gla
     from fla.ops.gla.fused_recurrent import fused_recurrent_gla
 
-elif ATTENTION_TYPE == 'rwkv7':
+elif 'rwkv7' in ATTENTION_TYPE:
     HEAD_SIZE = int(os.environ["RWKV_HEAD_SIZE_A"])
     CTX_LEN = int(os.environ["RWKV_CTXLEN"])
 
     from torch.utils.cpp_extension import load
 
-    v7_kernel_version = 'fla_triton'
-    if torch.version.hip and v7_kernel_version != 'fla_triton':
-        v7_kernel_version ='wind_triton_bighead'
+    if ATTENTION_TYPE == 'rwkv7':
+        ATTENTION_TYPE = 'rwkv7_wind_triton_bighead'
+    if torch.version.hip and 'fla_' not in ATTENTION_TYPE:
+        ATTENTION_TYPE ='rwkv7_wind_triton_bighead'
 
-    if v7_kernel_version == 'fla_triton':
+    if ATTENTION_TYPE == 'rwkv7_fla_chunk':
         from fla.ops.rwkv7.chunk import chunk_rwkv7
         def RUN_CUDA_RWKV7g(r, w, k, v, a, b, head_dim:int) -> torch.Tensor:
             B,T,HC = r.shape
             r,w,k,v,a,b = [i.view(B,T,HC//head_dim,head_dim) for i in [r,w,k,v,a,b]]
             return chunk_rwkv7(r, -w.float().exp(), k, v, a, b, output_final_state=False)[0]
-    if v7_kernel_version == 'wind_triton':
+    elif ATTENTION_TYPE == 'rwkv7_wind_triton':
         from rwkv7_attn_triton import attn_triton as RUN_CUDA_RWKV7g
-    elif v7_kernel_version == 'wind_triton_bighead':
+    elif ATTENTION_TYPE == 'rwkv7_wind_triton_bighead':
         from rwkv7_attn_triton_bighead import attn_triton_bighead as RUN_CUDA_RWKV7g
-    elif v7_kernel_version in ('wind_cuda', 'wind_cuda_full'):
+    elif ATTENTION_TYPE in ('rwkv7_wind_cuda', 'rwkv7_wind_cuda_full'):
         CHUNK_LEN = 16
 
         flags = [f'-D_C_={HEAD_SIZE}', "-O3"]
@@ -58,7 +58,7 @@ elif ATTENTION_TYPE == 'rwkv7':
             else:
                 flags += ["-res-usage", "--use_fast_math", "-Xptxas -O3", "--extra-device-vectorization"]
 
-        if v7_kernel_version == 'wind_cuda_full':
+        if ATTENTION_TYPE == 'rwkv7_wind_cuda_full':
             sources=['rwkv_cuda_wind/wind_rwkv7_full.cu']
         else:
             sources=['rwkv_cuda_wind/wind_rwkv7.cpp', 'rwkv_cuda_wind/wind_rwkv7.cu']
@@ -96,7 +96,7 @@ elif ATTENTION_TYPE == 'rwkv7':
             q,w,k,v,a,b = [i.view(B,T,HC//head_dim,head_dim) for i in [q,w,k,v,a,b]]            
             return WindRWKV7.apply(w,q,k,v,a,b).view(B,T,HC)
             
-    elif v7_kernel_version == 'wind_backstepping':
+    elif ATTENTION_TYPE == 'rwkv7_wind_backstepping':
         CHUNK_LEN = 16
 
         flags = [f'-D_C_={HEAD_SIZE}', f"-D_CHUNK_LEN_={CHUNK_LEN}", "-O3"]
@@ -135,7 +135,7 @@ elif ATTENTION_TYPE == 'rwkv7':
             B,T,HC = q.shape
             q,w,k,v,a,b = [i.view(B,T,HC//head_dim,head_dim) for i in [q,w,k,v,a,b]]
             return WindBackstepping.apply(w,q,k,v,a,b).view(B,T,HC)
-    elif v7_kernel_version == 'cuda':
+    elif ATTENTION_TYPE == 'rwkv7_cuda':
         DTYPE = torch.bfloat16
         XTYPE = torch.float
         T = CTX_LEN
@@ -198,6 +198,9 @@ elif ATTENTION_TYPE == 'rwkv7':
                     return (gr, gw, gk, gv, ga, gb)
         def RUN_CUDA_RWKV7g(r, w, k, v, a, b, head_dim:int) -> torch.Tensor:
             return WKV_7g.apply(r, w, k, v, a, b, head_dim)
+    else:
+        print("Bad attention type", ATTENTION_TYPE)
+        assert False, 'bad attention type specified'
 
 
 # Copied from transformers.models.llama.modeling_llama.LlamaRMSNorm with Llama->Qwen2
@@ -279,22 +282,23 @@ class LLMOutput:
 class TMix_qwen2(nn.Module):
     def get_default_state_factory(self): return get_tmix_default_state
 
-    def __init__(self, config, layer_id):
+    def __init__(self, config:TrainerCLI_Config, layer_id):
         super().__init__()
         self.config = config
         self.layer_id = layer_id
-        self.ctx_len = config.ctx_len
+        model_config:Transformer_Config = config.model
+        self.ctx_len = model_config.ctx_len
 
-        self.head_dim = config.head_size
+        self.head_dim = model_config.head_size
 
-        self.hidden_size = config.n_embd
-        self.num_heads = config.dim_att // self.head_dim
-        self.num_key_value_heads = config.num_key_value_heads if config.num_key_value_heads > 0 else self.num_heads
+        self.hidden_size = model_config.n_embd
+        self.num_heads = model_config.dim_att // self.head_dim
+        self.num_key_value_heads = model_config.num_key_value_heads if model_config.num_key_value_heads > 0 else self.num_heads
         self.num_key_value_groups = self.num_heads // self.num_key_value_heads
-        # self.max_position_embeddings = config.max_position_embeddings
-        # self.rope_theta = config.rope_theta
+        # self.max_position_embeddings = model_config.max_position_embeddings
+        # self.rope_theta = model_config.rope_theta
         # self.is_causal = True
-        # self.attention_dropout = config.attention_dropout
+        # self.attention_dropout = model_config.attention_dropout
 
         if (self.head_dim * self.num_heads) != self.hidden_size:
             raise ValueError(
@@ -308,8 +312,8 @@ class TMix_qwen2(nn.Module):
 
         # self.rotary_emb = Qwen2RotaryEmbedding(
         #     self.head_dim,
-        #     max_position_embeddings=config.rope.max_seqlen,
-        #     base=config.rope.base,
+        #     max_position_embeddings=model_config.rope.max_seqlen,
+        #     base=model_config.rope.base,
         # )
 
     def forward(self, x, reset_mask, v_first, last_model_state:ModelState, shared:Shared, output_attentions:bool=False):
@@ -379,10 +383,12 @@ class TMix_qwen2rwkv6(TMix_qwen2):
     and adds RWKV specific weights for tokenshift, decay, time_first, and the final layernorm.
     """
 
-    def __init__(self, config:Transformer_Config, layer_id):
+    def __init__(self, config:TrainerCLI_Config, layer_id):
         super().__init__(config, layer_id)
 
-        n_layer = config.n_layer
+        model_config:Transformer_Config = config.model
+
+        n_layer = model_config.n_layer
         n_embd = self.hidden_size
         dim_att = self.num_heads * self.head_dim
         layer_id = self.layer_id
@@ -499,7 +505,7 @@ class TMix_qwen2rwkv6(TMix_qwen2):
         #         target_dtype = torch.get_autocast_gpu_dtype()
         #     # Handle the case where the model is quantized
         #     elif hasattr(self.config, "_pre_quantization_dtype"):
-        #         target_dtype = self.config._pre_quantization_dtype
+        #         target_dtype = self.model_config._pre_quantization_dtype
         #     else:
         #         target_dtype = self.q_proj.weight.dtype
 
@@ -546,22 +552,23 @@ class TMix_qwen2rwkv7(TMix_qwen2):
     and adds RWKV specific weights for tokenshift, decay, time_first, and the final layernorm.
     """
 
-    def __init__(self, config:Transformer_Config, layer_idx):
+    def __init__(self, config:TrainerCLI_Config, layer_idx):
         super().__init__(config, layer_idx)
         self.config = config
+        model_config:Transformer_Config = config.model
         self.layer_idx = layer_idx
 
         attention_bias = True
         attention_output_bias = False
 
-        C = self.hidden_size = config.n_embd
-        N = self.head_dim = config.head_size
+        C = self.hidden_size = model_config.n_embd
+        N = self.head_dim = model_config.head_size
         H = self.num_heads = C // N
         attention_hidden_size = H * N
-        self.num_key_value_heads = config.num_key_value_heads
+        self.num_key_value_heads = model_config.num_key_value_heads
         self.num_key_value_groups = self.num_heads // self.num_key_value_heads
         self.is_causal = True
-        #self.attention_dropout = config.attention_dropout
+        #self.attention_dropout = model_config.attention_dropout
 
         if self.hidden_size % self.num_heads != 0:
             raise ValueError(
@@ -570,10 +577,10 @@ class TMix_qwen2rwkv7(TMix_qwen2):
             )
         
         calc_lora_rank = lambda exponent, multiplier: max(1, round(self.hidden_size ** exponent * multiplier / 32)) * 32
-        lora_rank_decay = calc_lora_rank(0.5, 1.8) # config.lora_rank_decay or calc_lora_rank(0.5, 1.8)
-        lora_rank_iclr = calc_lora_rank(0.5, 1.8) # config.lora_rank_iclr or calc_lora_rank(0.5, 1.8)
-        lora_rank_value_residual_mix = calc_lora_rank(0.5, 1.3) # config.lora_rank_value_residual_mix or calc_lora_rank(0.5, 1.3)
-        lora_rank_gate = calc_lora_rank(0.8, 0.6) # config.lora_rank_gate or calc_lora_rank(0.8, 0.6)
+        lora_rank_decay = calc_lora_rank(0.5, 1.8) # model_config.lora_rank_decay or calc_lora_rank(0.5, 1.8)
+        lora_rank_iclr = calc_lora_rank(0.5, 1.8) # model_config.lora_rank_iclr or calc_lora_rank(0.5, 1.8)
+        lora_rank_value_residual_mix = calc_lora_rank(0.5, 1.3) # model_config.lora_rank_value_residual_mix or calc_lora_rank(0.5, 1.3)
+        lora_rank_gate = calc_lora_rank(0.8, 0.6) # model_config.lora_rank_gate or calc_lora_rank(0.8, 0.6)
 
         # self.x_r = nn.Parameter(torch.empty(1,1,C))
         # self.x_w = nn.Parameter(torch.empty(1,1,C))
@@ -608,7 +615,7 @@ class TMix_qwen2rwkv7(TMix_qwen2):
         # self.output = nn.Linear(self.num_heads * self.head_dim, self.hidden_size, bias=attention_output_bias)
         self.ln_x = nn.GroupNorm(H, C, eps=self.head_dim * 1e-5)
 
-        num_hidden_layers = n_layer = self.config.n_layer
+        num_hidden_layers = n_layer = model_config.n_layer
         n_embd = self.hidden_size
         dim_att = self.num_heads * self.head_dim
         layer_id = self.layer_idx
@@ -819,25 +826,25 @@ class Qwen2DecoderLayer(nn.Module):
         self.config = config
         self.layer_id = layer_id
 
-        args:Transformer_Config = config.model
+        model_config:Transformer_Config = config.model
 
-        self.input_layernorm = Qwen2RMSNorm(args.n_embd, eps=args.rms_norm_eps)
-        self.post_attention_layernorm = Qwen2RMSNorm(args.n_embd, eps=args.rms_norm_eps)
+        self.input_layernorm = Qwen2RMSNorm(model_config.n_embd, eps=model_config.rms_norm_eps)
+        self.post_attention_layernorm = Qwen2RMSNorm(model_config.n_embd, eps=model_config.rms_norm_eps)
 
-        cmix = CMix_qwen2(args, layer_id)
+        cmix = CMix_qwen2(model_config, layer_id)
 
-        if args.attention_type == 'rwkv6':
-            self.self_attn = TMix_qwen2rwkv6(args, layer_id)
-        elif args.attention_type == 'rwkv7':
-            self.self_attn = TMix_qwen2rwkv7(args, layer_id)
+        if 'rwkv6' in model_config.attention_type:
+            self.self_attn = TMix_qwen2rwkv6(config, layer_id)
+        elif 'rwkv7' in model_config.attention_type:
+            self.self_attn = TMix_qwen2rwkv7(config, layer_id)
         else:
-            self.self_attn = TMix_qwen2(args, layer_id)
+            self.self_attn = TMix_qwen2(config, layer_id)
         self.default_time_mix_state_factory = self.self_attn.get_default_state_factory() if hasattr(self.self_attn, 'get_default_state_factory') else lambda x, c, r: TimeMixState()
 
         self.teacher_attn = None
         if config.train is not None:
             if config.train.attention_distillation_stage in (1, 2):
-                self.teacher_attn = TMix_qwen2(args, layer_id)
+                self.teacher_attn = TMix_qwen2(config, layer_id)
         
         self.default_channel_mix_state_factory = cmix.get_default_state_factory() if hasattr(cmix, 'get_default_state_factory') else lambda x, c, r: ChannelMixState()
         self.mlp = cmix
