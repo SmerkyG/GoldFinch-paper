@@ -88,8 +88,9 @@ class LightningModelWrapper(pl.LightningModule):
             if self.trainer.local_rank == 0:
                 print("Moving student to CPU")
                 self.model = self.model.to_empty(device=torch.device('cpu'), recurse=True)
-                print("Moving teacher to CPU")
-                self.teacher = self.teacher.to_empty(device=torch.device('cpu'), recurse=True)
+                if self.teacher is not None:
+                    print("Moving teacher to CPU")
+                    self.teacher = self.teacher.to_empty(device=torch.device('cpu'), recurse=True)
 
         if self.config.train is not None:
             if self.config.train.load_model == '' or (self.config.train.load_partial and self.config.train.attention_distillation_stage != 3):
