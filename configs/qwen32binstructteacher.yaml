@@ -12,7 +12,7 @@ train:
       head_size: 128
       n_embd: 5120
       dim_ffn: 27648
-      rms_norm_eps: 1e-5
+      rms_norm_eps: 1e-6
       n_layer: 64
       rope:
           __type__: configs.RoPE_Config

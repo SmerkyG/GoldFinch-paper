@@ -10,7 +10,7 @@ model:
     head_size: 128
     n_embd: 8192
     dim_ffn: 29568
-    rms_norm_eps: 1e-5
+    rms_norm_eps: 1e-6 # NOTE - this is different for non-instruct: 1e-5
     n_layer: 80
     rope:
         __type__: configs.RoPE_Config
