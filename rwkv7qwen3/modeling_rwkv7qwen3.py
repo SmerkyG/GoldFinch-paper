@@ -29,7 +29,8 @@ from torch import nn
 import torch.nn.functional as F
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 
-from transformers.cache_utils import Cache, StaticCache
+from transformers.cache_utils import Cache, StaticCache, SlidingWindowCache
+from transformers.modeling_attn_mask_utils import AttentionMaskConverter
 from transformers.generation import GenerationMixin
 from transformers.modeling_outputs import (
     BaseModelOutputWithPast,
@@ -122,21 +123,37 @@ class RWKV7State(Cache):
         self,
         kv_state: torch.Tensor,
         shift_state: torch.Tensor,
-        token_count: int,
         layer_idx: int,
+        token_count: int = 0,
+        is_attention_layer: bool = True,
         cache_kwargs: Optional[Dict[str, Any]] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:        
         # Update the number of seen tokens
         if layer_idx == 0:
+            if is_attention_layer:
+                token_count = kv_state.size(-2)
             self._seen_tokens += token_count
 
         # Update the cache
-        # There may be skipped layers, fill them with empty lists
-        for _ in range(len(self.layer_kv_states), layer_idx + 1):
-            self.layer_kv_states.append(torch.zeros_like(kv_state).requires_grad_(False))
-            self.layer_shift_states.append(torch.zeros_like(shift_state).requires_grad_(False))
-        self.layer_kv_states[layer_idx].copy_(kv_state)
-        self.layer_shift_states[layer_idx].copy_(shift_state)
+        if kv_state is not None:
+            # There may be skipped layers, fill them with empty lists
+            if layer_idx >= len(self.layer_kv_states):
+                for _ in range(len(self.layer_kv_states), layer_idx):
+                    if is_attention_layer:
+                        self.layer_kv_states.append(torch.tensor([])) # acts as key_cache
+                        self.layer_shift_states.append(torch.tensor([])) # acts as value_cache
+                    else:
+                        self.layer_kv_states.append(torch.zeros_like(kv_state).requires_grad_(False))
+                        self.layer_shift_states.append(torch.zeros_like(shift_state).requires_grad_(False))
+                self.layer_kv_states.append(kv_state) # acts as key_cache
+                self.layer_shift_states.append(shift_state) # acts as value_cache
+            else:
+                if is_attention_layer:
+                    self.layer_kv_states[layer_idx] = torch.cat([self.layer_kv_states[layer_idx], kv_state], dim=-2) # acts as key_cache
+                    self.layer_shift_states[layer_idx] = torch.cat([self.layer_shift_states[layer_idx], shift_state], dim=-2) # acts as value_cache
+                else:
+                    self.layer_kv_states[layer_idx].copy_(kv_state)
+                    self.layer_shift_states[layer_idx].copy_(shift_state)
 
         return self.layer_kv_states[layer_idx], self.layer_shift_states[layer_idx]
 
@@ -336,11 +353,12 @@ class RWKV7Attention(nn.Module):
         v_first: Optional[torch.Tensor] = None, 
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
-        past_key_values: Optional[RWKV7State] = None,
+        past_key_value: Optional[RWKV7State] = None,
         output_attentions: bool = False,
         use_cache: bool = False,
         cache_position: Optional[torch.LongTensor] = None,
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        **kwargs,
     ):
         if attention_mask is not None:
             assert len(attention_mask.shape) == 2, (
@@ -358,8 +376,8 @@ class RWKV7Attention(nn.Module):
         N = self.head_dim
         q_len = T
 
-        if use_cache and past_key_values is not None and len(past_key_values) > self.layer_idx:
-            input_vk_state, input_shift_state = past_key_values[self.layer_idx]
+        if use_cache and past_key_value is not None and len(past_key_value) > self.layer_idx:
+            input_vk_state, input_shift_state = past_key_value[self.layer_idx]
         else:
             input_vk_state, input_shift_state = torch.zeros(B,H,N,N, dtype=torch.float32,device=x.device), torch.zeros_like(x[:, -1:])
 
@@ -423,9 +441,8 @@ class RWKV7Attention(nn.Module):
 
         x = self.o_proj(x * g)
 
-        output_final_state = not self.training and use_cache and past_key_values is not None
-        if output_final_state:
-            past_key_values.update(output_vk_state, output_shift_state, q_len, self.layer_idx)
+        if past_key_value is not None:
+            past_key_value.update(output_vk_state, output_shift_state, self.layer_idx, q_len, self.layer_idx >= self.config.num_hidden_layers - self.config.num_attention_layers)
 
         return x, v_first
     
@@ -449,7 +466,7 @@ class RWKV7Qwen3DecoderLayer(nn.Module):
         v_first: Optional[torch.Tensor],
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
-        past_key_values: Optional[Cache] = None,
+        past_key_value: Optional[Cache] = None,
         output_attentions: Optional[bool] = False,
         use_cache: Optional[bool] = False,
         cache_position: Optional[torch.LongTensor] = None,
@@ -466,11 +483,12 @@ class RWKV7Qwen3DecoderLayer(nn.Module):
             v_first=v_first,
             attention_mask=attention_mask,
             position_ids=position_ids,
-            past_key_values=past_key_values,
+            past_key_value=past_key_value,
             output_attentions=output_attentions,
             use_cache=use_cache,
             cache_position=cache_position,
             position_embeddings=position_embeddings,
+            #is_causal=True,
         )
         hidden_states = residual + hidden_states
 
@@ -668,12 +686,11 @@ class RWKV7Qwen3Model(RWKV7Qwen3PreTrainedModel):
         if (input_ids is None) ^ (inputs_embeds is not None):
             raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
 
-        if self.gradient_checkpointing and self.training:
-            if use_cache:
-                logger.warning_once(
-                    "`use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`..."
-                )
-                use_cache = False
+        if self.gradient_checkpointing and self.training and use_cache:
+            logger.warning_once(
+                "`use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`..."
+            )
+            use_cache = False
 
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
@@ -690,10 +707,11 @@ class RWKV7Qwen3Model(RWKV7Qwen3PreTrainedModel):
         if position_ids is None:
             position_ids = cache_position.unsqueeze(0)
 
-        # causal_mask = self._update_causal_mask(
-        #     attention_mask, inputs_embeds, cache_position, past_key_values, output_attentions
-        # )
-
+        # if self.config.num_attention_layers > 0:
+        #     causal_mask = self._update_causal_mask(
+        #         attention_mask, inputs_embeds, cache_position, past_key_values, output_attentions
+        #     )
+        # else:
         causal_mask = None
 
         hidden_states = inputs_embeds
@@ -730,9 +748,9 @@ class RWKV7Qwen3Model(RWKV7Qwen3PreTrainedModel):
             else:
                 layer_outputs = decoder_layer(
                     hidden_states,
-                    attention_mask=attention_mask,
+                    attention_mask=causal_mask,
                     position_ids=position_ids,
-                    past_key_values=past_key_values,
+                    past_key_value=past_key_values,
                     output_attentions=output_attentions,
                     use_cache=use_cache,
                     cache_position=cache_position,
@@ -882,41 +900,6 @@ class RWKV7Qwen3ForCausalLM(RWKV7Qwen3PreTrainedModel, GenerationMixin):
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
         )
-
-    def prepare_inputs_for_generation(
-        self,
-        input_ids: torch.LongTensor,
-        past_key_values: Optional[Cache] = None,
-        attention_mask: Optional[torch.LongTensor] = None,
-        inputs_embeds: Optional[torch.FloatTensor] = None,
-        cache_position: Optional[torch.LongTensor] = None,
-        **kwargs,
-    ):
-        # only last token for `inputs_ids` if the `past_key_values` is not empty.
-        if past_key_values is not None and len(past_key_values) > 0:
-            input_ids = input_ids[:, -1:]
-
-        model_inputs = {
-            'past_key_values': past_key_values,
-            'attention_mask': attention_mask,
-            'cache_position': cache_position,
-        }
-        # if `inputs_embeds` are passed, we only want to use them in the 1st generation step
-        if inputs_embeds is not None and past_key_values is None:
-            model_inputs['inputs_embeds'] = inputs_embeds
-        else:
-            # The `contiguous()` here is necessary to have a static stride during decoding. torchdynamo otherwise
-            # recompiles graphs as the stride of the inputs is a guard.
-            # Ref: https://github.com/huggingface/transformers/pull/29114
-            # TODO: use `next_tokens` directly instead.
-            model_inputs['input_ids'] = input_ids.contiguous()
-
-        model_inputs.update(**kwargs)
-
-        # 8. Remove unexpected `generate` inputs (TODO @joao: fix trainer and examples)
-        model_inputs.pop("labels", None)
-
-        return model_inputs        
 
 @add_start_docstrings(
     """
