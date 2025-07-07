@@ -4,7 +4,7 @@ model:
 train:
   wandb: qwen2rwkv
   
-  proj_suffix: 4-8k
+  proj_suffix: 3-8k
   train_stage: 3
   load_partial: 0
 

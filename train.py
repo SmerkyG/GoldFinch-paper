@@ -70,7 +70,7 @@ if __name__ == "__main__":
 
     assert config.train.train_stage >= -1
 
-    EPOCH_SAMPLE_SIZE = 40320
+    EPOCH_SAMPLE_SIZE = 40320 # 2*3*4*5*6*7*8
     runtime_config.epoch_count = max(1, config.train.magic_prime // EPOCH_SAMPLE_SIZE)
 
     runtime_config.epoch_global_steps = EPOCH_SAMPLE_SIZE // runtime_config.global_step_bsz
@@ -173,7 +173,7 @@ if __name__ == "__main__":
     from safetensors.torch import load_file
 
     # NOTE - this import MUST come AFTER the JIT gets disabled above or that disabling won't take effect correctly for the model
-    import models.qwen2
+    #import models.qwen2
 
     strategy_obj = config.train.strategy
     if 'fsdp' in config.train.strategy:

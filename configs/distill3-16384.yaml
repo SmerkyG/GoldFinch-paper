@@ -4,14 +4,14 @@ model:
 train:
   wandb: qwen2rwkv
   
-  proj_suffix: 4-16k
+  proj_suffix: 3-16k
   train_stage: 3
   load_partial: 0
 
   data_type: "binidx" 
-  data_file: "data/dclm-10B" #"data/minipile_qwen2" 
+  data_file: "data/dclm-bigbrain-1B" # "data/dclm-10B" #"data/minipile_qwen2" 
   my_exit_tokens: 200000000 #1491785955
-  magic_prime: 91541
+  magic_prime: 59141 # 91541
 
   optimizer: dsfusedadamw
   lr_wait: 0.8
@@ -28,7 +28,7 @@ train:
   num_nodes: 1
   micro_bsz: 2
   accumulate_grad_batches: 1 # 96 total bsz
-  strategy: fsdp 
+  strategy: deepspeed_stage_1 # fsdp 
   grad_cp: 1
   ds_bucket_mb: 200 # set to 2 for consumer GPUs, set to 200 for A100 / H100 (affects speed & vram usage)
 

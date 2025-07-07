@@ -166,6 +166,9 @@ except ImportError:
     print("Additionally, ensure you have at least version 2.2.0 of Triton installed:")
     print("pip install triton>=2.2.0")
 
+def is_layer_attention(config, layer_id):
+    return layer_id >= config.num_hidden_layers - config.num_attention_layers and (layer_id > min(config.num_hidden_layers, config.last_striping_layer) or (min(config.num_hidden_layers-1, config.last_striping_layer) - layer_id) % config.attention_striping == 0)
+
 class Qwen3RotaryEmbedding(nn.Module):
     def __init__(self, config: RWKV7Qwen3Config, device=None):
         super().__init__()
@@ -225,7 +228,14 @@ class Qwen3RotaryEmbedding(nn.Module):
         sin = sin * self.attention_scaling
 
         return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)
-    
+
+def rms_norm(hidden_states, eps = 1e-6):
+    input_dtype = hidden_states.dtype
+    hidden_states = hidden_states.to(torch.float32)
+    variance = hidden_states.pow(2).mean(-1, keepdim=True)
+    hidden_states = hidden_states * torch.rsqrt(variance + eps)
+    return hidden_states.to(input_dtype)
+
 def generate_rotary_embedding(max_seqlen:int, dim:int, theta:float = 10000.0, scale:float = 1):
     #inv_freq = 1.0 / (theta ** (torch.arange(0, dim, 2, dtype=torch.float).to(device) / dim))
 
@@ -269,6 +279,308 @@ def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
     k_embed = (k * cos) + (rotate_half(k) * sin)
     return q_embed, k_embed
 
+from typing import Callable, Optional, Tuple, Union
+from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
+from transformers.processing_utils import Unpack
+from transformers.modeling_flash_attention_utils import FlashAttentionKwargs
+
+def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
+    """
+    This is the equivalent of torch.repeat_interleave(x, dim=1, repeats=n_rep). The hidden states go from (batch,
+    num_key_value_heads, seqlen, head_dim) to (batch, num_attention_heads, seqlen, head_dim)
+    """
+    batch, num_key_value_heads, slen, head_dim = hidden_states.shape
+    if n_rep == 1:
+        return hidden_states
+    hidden_states = hidden_states[:, :, None, :, :].expand(batch, num_key_value_heads, n_rep, slen, head_dim)
+    return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
+
+def eager_attention_forward(
+    module: nn.Module,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    attention_mask: Optional[torch.Tensor],
+    scaling: float,
+    dropout: float = 0.0,
+    **kwargs,
+):
+    key_states = repeat_kv(key, module.num_key_value_groups)
+    value_states = repeat_kv(value, module.num_key_value_groups)
+
+    attn_weights = torch.matmul(query, key_states.transpose(2, 3)) * scaling
+    if attention_mask is not None:
+        causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
+        attn_weights = attn_weights + causal_mask
+
+    attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query.dtype)
+    attn_weights = nn.functional.dropout(attn_weights, p=dropout, training=module.training)
+    attn_output = torch.matmul(attn_weights, value_states)
+    attn_output = attn_output.transpose(1, 2).contiguous()
+
+    return attn_output, attn_weights
+
+from torch.nn.attention.flex_attention import create_block_mask, flex_attention, create_mask
+
+SLIDING_WINDOW = 1024
+
+def sliding_window_causal(score, b, h, q_idx, kv_idx):
+    return torch.where((q_idx >= kv_idx) & (q_idx - kv_idx <= SLIDING_WINDOW), score, -float("inf"))
+
+def sliding_window_causal_mask(b, h, q_idx, kv_idx):
+    causal_mask = q_idx >= kv_idx
+    window_mask = q_idx - kv_idx <= SLIDING_WINDOW 
+    return causal_mask & window_mask
+
+block_mask = None
+
+class Qwen3AttentionAdapted(Qwen3Attention):
+    # def forward(
+    #     self,
+    #     hidden_states: torch.Tensor,
+    #     frozen_residual: torch.Tensor,
+    #     v_first: Optional[torch.Tensor] = None, 
+    #     **kwargs: Unpack[FlashAttentionKwargs],
+    # ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
+    #     return super().forward(hidden_states, **kwargs)[0], v_first
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        frozen_residual: torch.Tensor,
+        v_first: Optional[torch.Tensor] = None, 
+        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        past_key_value: Optional[Cache] = None,
+        cache_position: Optional[torch.LongTensor] = None,
+        **kwargs: Unpack[FlashAttentionKwargs],
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
+        x = hidden_states
+
+        B, L, D = x.size()
+
+        input_shape = x.shape[:-1]
+        hidden_shape = (*input_shape, -1, self.head_dim)
+
+        q = self.q_norm(self.q_proj(x).view(hidden_shape)).transpose(1, 2)
+        k = self.k_norm(self.k_proj(x).view(hidden_shape)).transpose(1, 2)
+        v = self.v_proj(x).view(hidden_shape).transpose(1, 2)
+
+        cos, sin = position_embeddings
+        q, k = apply_rotary_pos_emb(q, k, cos, sin)
+
+        if past_key_value is not None:
+            # sin and cos are specific to RoPE models; cache_position needed for the static cache
+            cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
+            k, v = past_key_value.update(k, v, self.layer_idx, cache_kwargs)
+
+        # repeat k/v heads if n_kv_heads < n_heads
+        k = repeat_kv(k, self.num_key_value_groups)
+        v = repeat_kv(v, self.num_key_value_groups)
+
+        S = k.size(-2)
+
+        # attention_interface: Callable = eager_attention_forward
+        # if self.config._attn_implementation != "eager":
+        #     attention_interface = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
+
+        # attn_output, attn_weights = attention_interface(
+        #     self,
+        #     query_states,
+        #     key_states,
+        #     value_states,
+        #     attention_mask,
+        #     dropout=0.0 if not self.training else self.attention_dropout,
+        #     scaling=self.scaling,
+        #     sliding_window=self.sliding_window,  # diff with Llama
+        #     **kwargs,
+        # )
+
+        y = nn.functional.scaled_dot_product_attention(q, k, v, dropout_p=0.0, is_causal= L == S)
+        y = y.transpose(1,2)
+        y = y.reshape(*input_shape, -1)#.contiguous()
+        y = self.o_proj(y)
+
+        attn_weights = None
+
+        return y, v_first
+
+class Qwen3DoubleAttention(Qwen3Attention):
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        frozen_residual: torch.Tensor,
+        v_first: Optional[torch.Tensor] = None, 
+        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        past_key_value: Optional[Cache] = None,
+        cache_position: Optional[torch.LongTensor] = None,
+        **kwargs: Unpack[FlashAttentionKwargs],
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
+        x = hidden_states
+        if self.layer_idx == self.config.num_hidden_layers - self.config.num_attention_layers:
+            x = torch.cat([x, x], dim=1)
+
+        B, L, D = x.size()
+        L = L // 2
+
+        w, x = x.view(B, 2, L, D).unbind(1)
+
+        input_shape = x.shape[:-1]
+        hidden_shape = (*input_shape, -1, self.head_dim)
+
+        # sliding window attention
+
+        q = self.q_norm(self.q_proj(w).view(hidden_shape)).transpose(1, 2)
+        k = self.k_norm(self.k_proj(w).view(hidden_shape)).transpose(1, 2)
+        v = self.v_proj(w).view(hidden_shape).transpose(1, 2)
+
+        cos, sin = position_embeddings
+        q, k = apply_rotary_pos_emb(q, k, cos, sin)
+
+        if past_key_value is not None:
+            # sin and cos are specific to RoPE models; cache_position needed for the static cache
+            cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
+            k, v = past_key_value.update(k, v, self.layer_idx, cache_kwargs)
+
+        # repeat k/v heads if n_kv_heads < n_heads
+        k = repeat_kv(k, self.num_key_value_groups)
+        v = repeat_kv(v, self.num_key_value_groups)
+
+        S = k.size(-2)
+        #print("L,S",L,S)
+
+        #global block_mask
+        #if block_mask is None:
+        assert S==L or L==1, "bad q length versus kv length"
+        if S == L:
+            # FIXME - stupid training mask generated by create_mask appears to be off by one like 0 SWA would still have the current token in the window
+            ones = torch.ones([L,S], dtype=torch.bool, device=q.device)
+            block_mask = ones.tril() ^ ones.tril(diagonal=-SLIDING_WINDOW-1)
+            #block_mask = create_mask(mod_fn=sliding_window_causal_mask, B=None, H=None, Q_LEN=S, KV_LEN=L, device=q.device)
+        else:
+            block_mask = torch.ones([L,S], dtype=torch.bool, device=q.device)
+            # FIXME - stupid training mask generated by create_mask appears to be off by one like 0 SWA would still have the current token in the window
+            block_mask[:,:-SLIDING_WINDOW-1] = False
+        y = nn.functional.scaled_dot_product_attention(q, k, v, dropout_p=0.0, attn_mask=block_mask)
+        y = y.transpose(1,2)
+        y = y.reshape(*input_shape, -1)#.contiguous()
+        y_w = self.o_proj(y)
+
+        # attention_interface: Callable = eager_attention_forward
+        # if self.config._attn_implementation != "eager":
+        #     attention_interface = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
+
+        # attn_output, attn_weights = attention_interface(
+        #     self,
+        #     query_states,
+        #     key_states,
+        #     value_states,
+        #     attention_mask,
+        #     dropout=0.0 if not self.training else self.attention_dropout,
+        #     scaling=self.scaling,
+        #     sliding_window=self.sliding_window,  # diff with Llama
+        #     **kwargs,
+        # )
+
+        # global attention
+
+        q = self.q_norm(self.q_proj(x).view(hidden_shape)).transpose(1, 2)
+        q, _ = apply_rotary_pos_emb(q, q, cos, sin)
+        y = nn.functional.scaled_dot_product_attention(q, k, v, dropout_p=0.0, is_causal= L == S)
+        y = y.transpose(1,2)
+        y = y.reshape(*input_shape, -1)#.contiguous()
+        y = self.o_proj(y)
+
+        if self.layer_idx < self.config.num_hidden_layers - 1:
+            y = torch.cat([y_w, y], dim=1)
+
+        attn_weights = None
+
+        return y, v_first
+
+class Qwen3NewAttention(Qwen3Attention):
+    """Multi-headed attention from 'Attention Is All You Need' paper"""
+
+    def __init__(self, config: RWKV7Qwen3Config, layer_idx: int):
+        super().__init__(config, layer_idx)
+
+        ddd = torch.empty(1, 1, config.hidden_size)
+        self.time_maa_x = nn.Parameter(torch.empty_like(ddd))
+        self.time_maa_k = nn.Parameter(torch.empty_like(ddd))
+        self.time_maa_v = nn.Parameter(torch.empty_like(ddd))
+
+        calc_lora_rank = lambda exponent, multiplier: max(1, round(config.hidden_size ** exponent * multiplier / 32)) * 32
+
+        lora_rank_tokenshift = config.lora_rank_tokenshift or calc_lora_rank(0.5, 1.8)
+        #lora_rank_tokenshift = 32 if n_embd < 4096 else 64
+
+        self.time_maa_w2 = nn.Parameter(torch.empty(2, lora_rank_tokenshift, config.hidden_size))
+        self.time_maa_w1 = nn.Parameter(torch.empty(config.hidden_size, lora_rank_tokenshift*self.time_maa_w2.size(0)))
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        frozen_residual: torch.Tensor,
+        v_first: Optional[torch.Tensor] = None, 
+        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        past_key_value: Optional[Cache] = None,
+        cache_position: Optional[torch.LongTensor] = None,
+        **kwargs: Unpack[FlashAttentionKwargs],
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
+        input_shape = hidden_states.shape[:-1]
+        hidden_shape = (*input_shape, -1, self.head_dim)
+
+        dfrozen_residualprev = torch.nn.functional.pad(frozen_residual, (0, 0, 1, -1)) - frozen_residual
+
+        xxx = frozen_residual + dfrozen_residualprev * self.time_maa_x
+        xxx = torch.tanh(xxx @ self.time_maa_w1).view(hidden_states.shape[0]*hidden_states.shape[1], self.time_maa_w2.size(0), -1).transpose(0, 1)
+        xxx = torch.bmm(xxx, self.time_maa_w2).view(self.time_maa_w2.size(0), *hidden_states.shape)
+
+        mk, mv = xxx.unbind(dim=0)
+        xk = frozen_residual + dfrozen_residualprev * (self.time_maa_k + mk)
+        xv = frozen_residual + dfrozen_residualprev * (self.time_maa_v + mv)
+        #xk = xv = frozen_residual
+
+        query_states = self.q_norm(self.q_proj(hidden_states).view(hidden_shape)).transpose(1, 2)
+        key_states = self.k_norm(self.k_proj(xk).view(hidden_shape)).transpose(1, 2)
+        value_states = self.v_proj(xv).view(hidden_shape).transpose(1, 2)
+
+        cos, sin = position_embeddings
+        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
+
+        if past_key_value is not None:
+            # sin and cos are specific to RoPE models; cache_position needed for the static cache
+            cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
+            key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
+
+        attention_interface: Callable = eager_attention_forward
+        if self.config._attn_implementation != "eager":
+            if self.config._attn_implementation == "sdpa" and kwargs.get("output_attentions", False):
+                logger.warning_once(
+                    "`torch.nn.functional.scaled_dot_product_attention` does not support `output_attentions=True`. Falling back to "
+                    'eager attention. This warning can be removed using the argument `attn_implementation="eager"` when loading the model.'
+                )
+            else:
+                attention_interface = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
+
+        attn_output, attn_weights = attention_interface(
+            self,
+            query_states,
+            key_states,
+            value_states,
+            attention_mask,
+            dropout=0.0 if not self.training else self.attention_dropout,
+            scaling=self.scaling,
+            sliding_window=self.sliding_window,  # diff with Llama
+            **kwargs,
+        )
+
+        attn_output = attn_output.reshape(*input_shape, -1).contiguous()
+        attn_output = self.o_proj(attn_output)
+        return attn_output, v_first
+    
 class RWKV7Attention(nn.Module):
     def __init__(self, config, layer_idx: Optional[int] = None):
         super().__init__()
@@ -350,6 +662,7 @@ class RWKV7Attention(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
+        frozen_residual: torch.Tensor,
         v_first: Optional[torch.Tensor] = None, 
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
@@ -435,14 +748,15 @@ class RWKV7Attention(nn.Module):
             x, output_vk_state = fused_recurrent_rwkv7(r, log_w, k, v, -kk, kk*a, initial_state=input_vk_state, output_final_state=use_cache)
 
         if self.config.groupnorm_att:
-            x = torch.nn.functional.group_norm(x.view(B*T,H*N).float(), num_groups=H, weight=self.ln_x.weight.float(), bias=self.ln_x.bias.float(), eps = self.ln_x.eps).view(B,T,H*N).to(x.dtype)
+            x = torch.nn.functional.group_norm(x.view(B*T,H*N).float(), num_groups=H, weight=self.ln_x.weight.float(), bias=self.ln_x.bias.float(), eps = self.ln_x.eps).view(B,T,H*N).to(v.dtype)
         else:
-            x = x.view(B,T,H*N).to(x.dtype) * N ** -0.5
-
-        x = self.o_proj(x * g)
+            x = (x.view(B,T,H*N) * N ** -0.5).to(v.dtype)
+        if self.config.gate_rank_type != 0:
+            x = x * g
+        x = self.o_proj(x)
 
         if past_key_value is not None:
-            past_key_value.update(output_vk_state, output_shift_state, self.layer_idx, q_len, self.layer_idx >= self.config.num_hidden_layers - self.config.num_attention_layers)
+            past_key_value.update(output_vk_state, output_shift_state, self.layer_idx, q_len, is_layer_attention(self.config, self.layer_idx))
 
         return x, v_first
     
@@ -450,9 +764,10 @@ class RWKV7Qwen3DecoderLayer(nn.Module):
     def __init__(self, config: RWKV7Qwen3Config, layer_idx: int):
         nn.Module.__init__(self)
         self.hidden_size = config.hidden_size
+        self.layer_idx = layer_idx
 
-        if layer_idx >= config.num_hidden_layers - config.num_attention_layers:
-            self.self_attn = Qwen3Attention(config=config, layer_idx=layer_idx)
+        if is_layer_attention(config, layer_idx):
+            self.self_attn = Qwen3AttentionAdapted(config=config, layer_idx=layer_idx) # Qwen3DoubleAttention(config=config, layer_idx=layer_idx) # Qwen3NewAttention(config=config, layer_idx=layer_idx)
         else:
             self.self_attn = RWKV7Attention(config, layer_idx)
 
@@ -463,6 +778,7 @@ class RWKV7Qwen3DecoderLayer(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
+        frozen_residual: torch.Tensor,
         v_first: Optional[torch.Tensor],
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
@@ -474,12 +790,13 @@ class RWKV7Qwen3DecoderLayer(nn.Module):
         **kwargs,
     ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
         residual = hidden_states
-
+        
         hidden_states = self.input_layernorm(hidden_states)
 
         # Self Attention
         hidden_states, v_first = self.self_attn(
             hidden_states=hidden_states,
+            frozen_residual=frozen_residual,
             v_first=v_first,
             attention_mask=attention_mask,
             position_ids=position_ids,
@@ -490,6 +807,15 @@ class RWKV7Qwen3DecoderLayer(nn.Module):
             position_embeddings=position_embeddings,
             #is_causal=True,
         )
+
+        if hidden_states.size(1) != residual.size(1):
+            #print("ADJUSTING SIZE OF RESIDUAL FROM ", residual.size(1), " TO ", hidden_states.size(1))
+            if hidden_states.size(1) > residual.size(1):
+                assert hidden_states.size(1) == residual.size(1) * 2
+                residual = torch.cat([residual, residual], dim=1)
+            else:
+                residual = F.pad(residual, [0, 0, hidden_states.size(1) - residual.size(1), 0])
+
         hidden_states = residual + hidden_states
 
         # Fully Connected
@@ -727,8 +1053,10 @@ class RWKV7Qwen3Model(RWKV7Qwen3PreTrainedModel):
         all_self_attns = () if output_attentions else None
         next_decoder_cache = None
         v_first = None
-
+        
         for decoder_layer in self.layers:
+            if not is_layer_attention(self.config, decoder_layer.layer_idx):
+                frozen_residual = rms_norm(hidden_states)
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
 
@@ -736,6 +1064,7 @@ class RWKV7Qwen3Model(RWKV7Qwen3PreTrainedModel):
                 layer_outputs = self._gradient_checkpointing_func(
                     decoder_layer.__call__,
                     hidden_states,
+                    frozen_residual,
                     causal_mask,
                     position_ids,
                     past_key_values,
@@ -748,6 +1077,7 @@ class RWKV7Qwen3Model(RWKV7Qwen3PreTrainedModel):
             else:
                 layer_outputs = decoder_layer(
                     hidden_states,
+                    frozen_residual=frozen_residual,
                     attention_mask=causal_mask,
                     position_ids=position_ids,
                     past_key_value=past_key_values,

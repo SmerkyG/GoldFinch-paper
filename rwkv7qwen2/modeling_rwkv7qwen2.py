@@ -113,28 +113,6 @@ class RWKV7State(Cache):
         """
         return None
 
-    # def to_legacy_cache(self) -> Tuple[Tuple[torch.Tensor, torch.Tensor]]:
-    #     """Converts the `DynamicCache` instance into the its equivalent in the legacy cache format. Used for
-    #     backward compatibility."""
-    #     legacy_cache = ()
-    #     for layer_idx in range(len(self)):
-    #         legacy_cache += ((self.layer_kv_states[layer_idx], self.layer_shift_states[layer_idx]),)
-    #     return legacy_cache
-
-    # @classmethod
-    # #@deprecate_kwarg("num_hidden_layers", version="4.47.0")
-    # def from_legacy_cache(
-    #     cls, past_key_values: Optional[Tuple[Tuple[torch.FloatTensor, torch.FloatTensor]]] = None, num_hidden_layers: int | None = None
-    # ) -> "RWKV7State":
-    #     """Converts a cache in the legacy cache format into an equivalent `DynamicCache`. Used for
-    #     backward compatibility."""
-    #     cache = cls()
-    #     if past_key_values is not None:
-    #         for layer_idx in range(len(past_key_values)):
-    #             layer_kv_state, layer_shift_state = past_key_values[layer_idx]
-    #             cache.update(layer_kv_state, layer_shift_state, layer_idx)
-    #     return cache
-
     def crop(self, max_length: int):
         # can't implement this for linear attention variants
         return
@@ -144,8 +122,8 @@ class RWKV7State(Cache):
         self,
         kv_state: torch.Tensor,
         shift_state: torch.Tensor,
-        token_count: int,
         layer_idx: int,
+        token_count: int = 0,
         cache_kwargs: Optional[Dict[str, Any]] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:        
         # Update the number of seen tokens
@@ -162,54 +140,12 @@ class RWKV7State(Cache):
 
         return self.layer_kv_states[layer_idx], self.layer_shift_states[layer_idx]
 
-    # @deprecate_kwarg("num_hidden_layers", version="4.47.0")
-    # def batch_split(
-    #     self, full_batch_size: int, split_size: int, num_hidden_layers: int = None
-    # ) -> List["DynamicCache"]:
-    #     """Split the current instance into a list of `DynamicCache` by the batch size. This will be used by
-    #     `_split_model_inputs()` in `generation.utils`"""
-    #     out = []
-    #     for i in range(0, full_batch_size, split_size):
-    #         current_split = DynamicCache()
-    #         current_split._seen_tokens = self._seen_tokens
-    #         current_split.key_cache = [tensor[i : i + split_size] for tensor in self.key_cache]
-    #         current_split.value_cache = [tensor[i : i + split_size] for tensor in self.value_cache]
-    #         out.append(current_split)
-    #     return out
-
-    # @classmethod
-    # @deprecate_kwarg("num_hidden_layers", version="4.47.0")
-    # def from_batch_splits(cls, splits: List["DynamicCache"], num_hidden_layers: int = None) -> "DynamicCache":
-    #     """This is the opposite of the above `batch_split()` method. This will be used by `stack_model_outputs` in
-    #     `generation.utils`"""
-    #     cache = cls()
-    #     for idx in range(len(splits[0])):
-    #         key_cache = [current.key_cache[idx] for current in splits if current.key_cache[idx] != []]
-    #         value_cache = [current.key_cache[idx] for current in splits if current.key_cache[idx] != []]
-    #         if key_cache != []:
-    #             layer_keys = torch.cat(key_cache, dim=0)
-    #             layer_values = torch.cat(value_cache, dim=0)
-    #             cache.update(layer_keys, layer_values, idx)
-    #     return cache
-
-    # def batch_repeat_interleave(self, repeats: int):
-    #     """Repeat the cache `repeats` times in the batch dimension. Used in contrastive search."""
-    #     for layer_idx in range(len(self)):
-    #         self.key_cache[layer_idx] = self.key_cache[layer_idx].repeat_interleave(repeats, dim=0)
-    #         self.value_cache[layer_idx] = self.value_cache[layer_idx].repeat_interleave(repeats, dim=0)
-
-    # def batch_select_indices(self, indices: torch.Tensor):
-    #     """Only keep the `indices` in the batch dimension of the cache. Used in contrastive search."""
-    #     for layer_idx in range(len(self)):
-    #         self.key_cache[layer_idx] = self.key_cache[layer_idx][indices, ...]
-    #         self.value_cache[layer_idx] = self.value_cache[layer_idx][indices, ...]
-
 try:
     from fla.ops.rwkv7.chunk import chunk_rwkv7
     from fla.ops.rwkv7.fused_recurrent import fused_recurrent_rwkv7
 except ImportError:
     print("Required module is not installed. Please install it using the following commands:")
-    print("pip install -U git+https://github.com/fla-org/flash-linear-attention")
+    print("pip install --no-use-pep517 flash-linear-attention")
     print("Additionally, ensure you have at least version 2.2.0 of Triton installed:")
     print("pip install triton>=2.2.0")
 
@@ -290,15 +226,6 @@ def rotate_half(x):
     x2 = x[..., x.shape[-1] // 2 :]
     return torch.cat((-x2, x1), dim=-1)
 
-# # Copied from transformers.models.mixtral.modeling_mixtral.apply_rotary_pos_emb
-# def apply_rotary_pos_emb(q, k, cos, sin, unsqueeze_dim:int=1):
-#     B, L = q.size(0), q.size(-2)
-#     cos = cos[:L].unsqueeze(0).expand(B,L,-1).unsqueeze(unsqueeze_dim)
-#     sin = sin[:L].unsqueeze(0).expand(B,L,-1).unsqueeze(unsqueeze_dim)
-#     q_embed = (q * cos) + (rotate_half(q) * sin)
-#     k_embed = (k * cos) + (rotate_half(k) * sin)
-#     return q_embed, k_embed
-
 def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
     """Applies Rotary Position Embedding to the query and key tensors.
 
@@ -360,27 +287,27 @@ class RWKV7Attention(nn.Module):
         # self.x_a = nn.Parameter(torch.empty(1,1,C))
         # self.x_g = nn.Parameter(torch.empty(1,1,C))
 
-        self.w0 = nn.Parameter(torch.empty(1,1,C))
+        self.w0 = nn.Parameter(torch.empty(1,1,H*N))
         self.w1 = nn.Parameter(torch.empty(C, lora_rank_decay))
-        self.w2 = nn.Parameter(torch.empty(lora_rank_decay, C))
+        self.w2 = nn.Parameter(torch.empty(lora_rank_decay, H*N))
 
-        self.a0 = nn.Parameter(torch.empty(1,1,C))
+        self.a0 = nn.Parameter(torch.empty(1,1,H*N))
         self.a1 = nn.Parameter(torch.empty(C, lora_rank_iclr))
-        self.a2 = nn.Parameter(torch.empty(lora_rank_iclr, C))
+        self.a2 = nn.Parameter(torch.empty(lora_rank_iclr, H*N))
 
         #if layer_idx > 0:
-        self.v0 = nn.Parameter(torch.empty(1,1,C))
+        self.v0 = nn.Parameter(torch.empty(1,1,H*N))
         self.v1 = nn.Parameter(torch.empty(C, lora_rank_value_residual_mix))
-        self.v2 = nn.Parameter(torch.empty(lora_rank_value_residual_mix, C))
+        self.v2 = nn.Parameter(torch.empty(lora_rank_value_residual_mix, H*N))
 
         if config.gate_rank_type == 1:
-            self.gate = nn.Linear(C, C, bias=False)
+            self.gate = nn.Linear(C, H*N, bias=False)
         elif config.gate_rank_type == 2:
             self.g1 = nn.Parameter(torch.empty(C, lora_rank_gate))
-            self.g2 = nn.Parameter(torch.empty(lora_rank_gate, C))
+            self.g2 = nn.Parameter(torch.empty(lora_rank_gate, H*N))
 
-        self.k_k = nn.Parameter(torch.empty(1,1,C))
-        self.k_a = nn.Parameter(torch.empty(1,1,C))
+        self.k_k = nn.Parameter(torch.empty(1,1,H*N))
+        self.k_a = nn.Parameter(torch.empty(1,1,H*N))
         self.r_k = nn.Parameter(torch.empty(H,N))
 
         if self.config.groupnorm_att:
@@ -392,7 +319,7 @@ class RWKV7Attention(nn.Module):
         v_first: Optional[torch.Tensor] = None, 
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
-        past_key_values: Optional[RWKV7State] = None,
+        past_key_value: Optional[RWKV7State] = None,
         output_attentions: bool = False,
         use_cache: bool = False,
         cache_position: Optional[torch.LongTensor] = None,
@@ -414,8 +341,8 @@ class RWKV7Attention(nn.Module):
         N = self.head_dim
         q_len = T
 
-        if use_cache and past_key_values is not None and len(past_key_values) > self.layer_idx:
-            input_vk_state, input_shift_state = past_key_values[self.layer_idx]
+        if use_cache and past_key_value is not None and len(past_key_value) > self.layer_idx:
+            input_vk_state, input_shift_state = past_key_value[self.layer_idx]
         else:
             input_vk_state, input_shift_state = torch.zeros(B,H,N,N, dtype=torch.float32,device=x.device), torch.zeros_like(x[:, -1:])
 
@@ -448,13 +375,8 @@ class RWKV7Attention(nn.Module):
         if position_embeddings is not None:
             r = r.view(B,T,-1,N)
             k = k.view(B,T,-1,N)
-            # r = r.transpose(1,2) # BHTN
-            # k = k.transpose(1,2) # B(kvh)TN
             cos, sin = position_embeddings
-            # cos, sin = shared.angles.unbind(0)
             r, k = apply_rotary_pos_emb(r, k, cos, sin, unsqueeze_dim=2)
-            # r = r.transpose(1,2).view(B,T,-1).to(v.dtype)
-            # k = k.transpose(1,2).view(B,T,-1).to(v.dtype)
 
         # repeat k/v heads if n_kv_heads < n_heads
         k = k.view(B, T, -1, 1, self.head_dim).expand(-1, -1, -1, self.num_key_value_groups, -1).reshape(B, T, -1)
@@ -506,9 +428,8 @@ class RWKV7Attention(nn.Module):
         # x = x + ((r.view(B,T,H,-1)*k.view(B,T,H,-1)*self.r_k).sum(dim=-1, keepdim=True) * v.view(B,T,H,-1)).view(B,T,C)
         x = self.o_proj(x * g)
 
-        output_final_state = not self.training and use_cache and past_key_values is not None
-        if output_final_state:
-            past_key_values.update(output_vk_state, output_shift_state, q_len, self.layer_idx)
+        if past_key_value is not None:
+            past_key_value.update(output_vk_state, output_shift_state, self.layer_idx, q_len)
 
         return x, v_first
     
@@ -532,7 +453,7 @@ class RWKV7Qwen2DecoderLayer(nn.Module):
         v_first: Optional[torch.Tensor],
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
-        past_key_values: Optional[Cache] = None,
+        past_key_value: Optional[Cache] = None,
         output_attentions: Optional[bool] = False,
         use_cache: Optional[bool] = False,
         cache_position: Optional[torch.LongTensor] = None,
@@ -549,7 +470,7 @@ class RWKV7Qwen2DecoderLayer(nn.Module):
             v_first=v_first,
             attention_mask=attention_mask,
             position_ids=position_ids,
-            past_key_values=past_key_values,
+            past_key_value=past_key_value,
             output_attentions=output_attentions,
             use_cache=use_cache,
             cache_position=cache_position,
@@ -751,12 +672,11 @@ class RWKV7Qwen2Model(RWKV7Qwen2PreTrainedModel):
         if (input_ids is None) ^ (inputs_embeds is not None):
             raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
 
-        if self.gradient_checkpointing and self.training:
-            if use_cache:
-                logger.warning_once(
-                    "`use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`..."
-                )
-                use_cache = False
+        if self.gradient_checkpointing and self.training and use_cache:
+            logger.warning_once(
+                "`use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`..."
+            )
+            use_cache = False
 
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
@@ -815,7 +735,7 @@ class RWKV7Qwen2Model(RWKV7Qwen2PreTrainedModel):
                     hidden_states,
                     attention_mask=attention_mask,
                     position_ids=position_ids,
-                    past_key_values=past_key_values,
+                    past_key_value=past_key_values,
                     output_attentions=output_attentions,
                     use_cache=use_cache,
                     cache_position=cache_position,
@@ -965,41 +885,6 @@ class RWKV7Qwen2ForCausalLM(RWKV7Qwen2PreTrainedModel, GenerationMixin):
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
         )
-
-    def prepare_inputs_for_generation(
-        self,
-        input_ids: torch.LongTensor,
-        past_key_values: Optional[Cache] = None,
-        attention_mask: Optional[torch.LongTensor] = None,
-        inputs_embeds: Optional[torch.FloatTensor] = None,
-        cache_position: Optional[torch.LongTensor] = None,
-        **kwargs,
-    ):
-        # only last token for `inputs_ids` if the `past_key_values` is not empty.
-        if past_key_values is not None and len(past_key_values) > 0:
-            input_ids = input_ids[:, -1:]
-
-        model_inputs = {
-            'past_key_values': past_key_values,
-            'attention_mask': attention_mask,
-            'cache_position': cache_position,
-        }
-        # if `inputs_embeds` are passed, we only want to use them in the 1st generation step
-        if inputs_embeds is not None and past_key_values is None:
-            model_inputs['inputs_embeds'] = inputs_embeds
-        else:
-            # The `contiguous()` here is necessary to have a static stride during decoding. torchdynamo otherwise
-            # recompiles graphs as the stride of the inputs is a guard.
-            # Ref: https://github.com/huggingface/transformers/pull/29114
-            # TODO: use `next_tokens` directly instead.
-            model_inputs['input_ids'] = input_ids.contiguous()
-
-        model_inputs.update(**kwargs)
-
-        # 8. Remove unexpected `generate` inputs (TODO @joao: fix trainer and examples)
-        model_inputs.pop("labels", None)
-
-        return model_inputs        
 
 @add_start_docstrings(
     """

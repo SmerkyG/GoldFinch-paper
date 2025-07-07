@@ -145,6 +145,7 @@ class RWKV7Qwen3Config(PretrainedConfig):
         num_hidden_layers=32,
         num_attention_heads=32,
         num_key_value_heads=32,
+        lora_rank_tokenshift=None,
         lora_rank_decay=None,
         lora_rank_iclr=None,
         lora_rank_value_residual_mix=None,
@@ -162,6 +163,8 @@ class RWKV7Qwen3Config(PretrainedConfig):
         sliding_window=4096,
         max_window_layers=28,
         num_attention_layers=0,
+        attention_striping=1,
+        last_striping_layer=99999,
         attention_dropout=0.0,
         attention_bias=True,
         attention_output_bias=False,
@@ -181,12 +184,15 @@ class RWKV7Qwen3Config(PretrainedConfig):
         self.sliding_window = sliding_window if use_sliding_window else None
         self.max_window_layers = max_window_layers
         self.num_attention_layers = num_attention_layers
+        self.attention_striping = attention_striping
+        self.last_striping_layer = last_striping_layer
 
         # for backward compatibility
         if num_key_value_heads is None:
             num_key_value_heads = num_attention_heads
 
         self.num_key_value_heads = num_key_value_heads
+        self.lora_rank_tokenshift = lora_rank_tokenshift
         self.lora_rank_decay = lora_rank_decay
         self.lora_rank_iclr = lora_rank_iclr
         self.lora_rank_value_residual_mix = lora_rank_value_residual_mix

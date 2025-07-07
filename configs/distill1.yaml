@@ -32,6 +32,14 @@ train:
   # --my_exit_tokens 1565680565 --magic_prime 191099 --ctx_len 8192
   # --my_exit_tokens 1565680565 --magic_prime 95549 --ctx_len 16384
 
+  # dclm-bigbrain-1B
+  # --my_exit_tokens 969051408 --magic_prime 1892669 --ctx_len 512
+  # --my_exit_tokens 969051408 --magic_prime 946331 --ctx_len 1024
+  # --my_exit_tokens 969051408 --magic_prime 473159 --ctx_len 2048
+  # --my_exit_tokens 969051408 --magic_prime 236573 --ctx_len 4096
+  # --my_exit_tokens 969051408 --magic_prime 118277 --ctx_len 8192
+  # --my_exit_tokens 969051408 --magic_prime 59141 --ctx_len 16384
+
   magic_prime: 2929793
 
   optimizer: dsfusedadamw

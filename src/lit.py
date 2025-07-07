@@ -238,6 +238,15 @@ class LightningModelWrapper(pl.LightningModule):
         ckpt_path = config.train.load_model
         if ckpt_path != '':
             self.load_specific_model_weights(self.model, ckpt_path)
+            
+            # post-loading reset of parameters, if needed
+            if self.config.train is not None:
+                if self.config.train.load_model == '' or (self.config.train.load_partial and self.config.train.attention_distillation_stage in (0,1)):
+                    print("Resetting parameters")
+                    for submodule in self.model.modules():
+                        if hasattr(submodule, 'reset_parameters_after_load'):
+                            submodule.reset_parameters_after_load()
+
             self.model.set_grads()
         
         if self.teacher is not None and config.train.teacher is not None:
@@ -479,13 +488,22 @@ class LightningModelWrapper(pl.LightningModule):
 
             if self.config.model.hf_path == '':
                 if self.config.train.attention_distillation_stage == 0:
+                    #results.attentions = results.attentions[:self.config.model.n_layer-self.config.model.preserve_last_n_layers]
+                    #results.student_attentions = results.student_attentions[:self.config.model.n_layer-self.config.model.preserve_last_n_layers]
                     #repeated_loss_mask = loss_mask.repeat(len(results.attentions), 1)
                     training_loss = torch.linalg.matrix_norm(torch.cat(results.attentions, dim=0) - torch.cat(results.student_attentions, dim=0))
                     #training_loss = training_loss * repeated_loss_mask
                     training_loss = training_loss.float().mean() / results.attentions[0].size(-1) # FIXME - not quite perfect because the average will be brought down by uncounted EOS tokens
                 else: # self.config.train.attention_distillation_stage == 1:
+                    #results.post_attention_hidden_states = results.post_attention_hidden_states[:self.config.model.n_layer-self.config.model.preserve_last_n_layers]
+                    #results.student_post_attention_hidden_states = results.student_post_attention_hidden_states[:self.config.model.n_layer-self.config.model.preserve_last_n_layers]
                     #repeated_loss_mask = loss_mask.repeat(len(results.post_attention_hidden_states), 1)
                     training_loss = torch.linalg.vector_norm(torch.cat(results.post_attention_hidden_states, dim=0) - torch.cat(results.student_post_attention_hidden_states, dim=0), dim=-1)
+                    if batch_idx % 100 == 0:
+                        print('per layer losses')
+                        for i in range(len(results.post_attention_hidden_states)):
+                            layer_loss = torch.linalg.vector_norm(results.post_attention_hidden_states[i] - results.student_post_attention_hidden_states[i], dim=-1).mean()
+                            print(i, layer_loss.item())
                     #training_loss = training_loss * repeated_loss_mask
                     training_loss = training_loss.float().mean() * (results.post_attention_hidden_states[0].size(-1) ** -0.5) # FIXME - not quite perfect because the average will be brought down by uncounted EOS tokens
             reported_loss = training_loss

@@ -60,7 +60,7 @@ os.environ["RWKV_MODEL_TYPE"] = config.model.tmix
 os.environ["RWKV_CTXLEN"] = str(config.model.ctx_len)
 os.environ["RWKV_HEAD_SIZE_A"] = str(config.model.head_size)
 attention_type = str(config.model.attention_type)
-if attention_type == 'rwkv7':
+if 'rwkv7' in attention_type:
     attention_type = 'rwkv7_fla_fused_recurrent'
 os.environ["RWKV_ATTENTION_TYPE"] = attention_type
 
