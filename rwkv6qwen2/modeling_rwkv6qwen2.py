@@ -59,7 +59,7 @@ logger = logging.get_logger(__name__)
 _CHECKPOINT_FOR_DOC = "RWKV/RWKV6Qwen2-7B"
 _CONFIG_FOR_DOC = "RWKV6Qwen2Config"
 
-class RWKV6State(Cache):
+class RWKV6State():
     def __init__(self) -> None:
         super().__init__()
         self._seen_tokens = 0  # Used in `generate` to keep tally of how many tokens the cache has seen
@@ -114,28 +114,6 @@ class RWKV6State(Cache):
         """
         return None
 
-    # def to_legacy_cache(self) -> Tuple[Tuple[torch.Tensor, torch.Tensor]]:
-    #     """Converts the `DynamicCache` instance into the its equivalent in the legacy cache format. Used for
-    #     backward compatibility."""
-    #     legacy_cache = ()
-    #     for layer_idx in range(len(self)):
-    #         legacy_cache += ((self.layer_kv_states[layer_idx], self.layer_shift_states[layer_idx]),)
-    #     return legacy_cache
-
-    # @classmethod
-    # #@deprecate_kwarg("num_hidden_layers", version="4.47.0")
-    # def from_legacy_cache(
-    #     cls, past_key_values: Optional[Tuple[Tuple[torch.FloatTensor, torch.FloatTensor]]] = None, num_hidden_layers: int | None = None
-    # ) -> "RWKV6State":
-    #     """Converts a cache in the legacy cache format into an equivalent `DynamicCache`. Used for
-    #     backward compatibility."""
-    #     cache = cls()
-    #     if past_key_values is not None:
-    #         for layer_idx in range(len(past_key_values)):
-    #             layer_kv_state, layer_shift_state = past_key_values[layer_idx]
-    #             cache.update(layer_kv_state, layer_shift_state, layer_idx)
-    #     return cache
-
     def crop(self, max_length: int):
         # can't implement this for linear attention variants
         return
@@ -145,8 +123,8 @@ class RWKV6State(Cache):
         self,
         kv_state: torch.Tensor,
         shift_state: torch.Tensor,
-        token_count: int,
         layer_idx: int,
+        token_count: int = 0,
         cache_kwargs: Optional[Dict[str, Any]] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:        
         # Update the number of seen tokens
@@ -163,54 +141,12 @@ class RWKV6State(Cache):
 
         return self.layer_kv_states[layer_idx], self.layer_shift_states[layer_idx]
 
-    # @deprecate_kwarg("num_hidden_layers", version="4.47.0")
-    # def batch_split(
-    #     self, full_batch_size: int, split_size: int, num_hidden_layers: int = None
-    # ) -> List["DynamicCache"]:
-    #     """Split the current instance into a list of `DynamicCache` by the batch size. This will be used by
-    #     `_split_model_inputs()` in `generation.utils`"""
-    #     out = []
-    #     for i in range(0, full_batch_size, split_size):
-    #         current_split = DynamicCache()
-    #         current_split._seen_tokens = self._seen_tokens
-    #         current_split.key_cache = [tensor[i : i + split_size] for tensor in self.key_cache]
-    #         current_split.value_cache = [tensor[i : i + split_size] for tensor in self.value_cache]
-    #         out.append(current_split)
-    #     return out
-
-    # @classmethod
-    # @deprecate_kwarg("num_hidden_layers", version="4.47.0")
-    # def from_batch_splits(cls, splits: List["DynamicCache"], num_hidden_layers: int = None) -> "DynamicCache":
-    #     """This is the opposite of the above `batch_split()` method. This will be used by `stack_model_outputs` in
-    #     `generation.utils`"""
-    #     cache = cls()
-    #     for idx in range(len(splits[0])):
-    #         key_cache = [current.key_cache[idx] for current in splits if current.key_cache[idx] != []]
-    #         value_cache = [current.key_cache[idx] for current in splits if current.key_cache[idx] != []]
-    #         if key_cache != []:
-    #             layer_keys = torch.cat(key_cache, dim=0)
-    #             layer_values = torch.cat(value_cache, dim=0)
-    #             cache.update(layer_keys, layer_values, idx)
-    #     return cache
-
-    # def batch_repeat_interleave(self, repeats: int):
-    #     """Repeat the cache `repeats` times in the batch dimension. Used in contrastive search."""
-    #     for layer_idx in range(len(self)):
-    #         self.key_cache[layer_idx] = self.key_cache[layer_idx].repeat_interleave(repeats, dim=0)
-    #         self.value_cache[layer_idx] = self.value_cache[layer_idx].repeat_interleave(repeats, dim=0)
-
-    # def batch_select_indices(self, indices: torch.Tensor):
-    #     """Only keep the `indices` in the batch dimension of the cache. Used in contrastive search."""
-    #     for layer_idx in range(len(self)):
-    #         self.key_cache[layer_idx] = self.key_cache[layer_idx][indices, ...]
-    #         self.value_cache[layer_idx] = self.value_cache[layer_idx][indices, ...]
-
 try:
     #from fla.ops.gla.chunk import chunk_gla
     from fla.ops.gla.fused_recurrent import fused_recurrent_gla
 except ImportError:
     print("Required module is not installed. Please install it using the following commands:")
-    print("pip install -U git+https://github.com/fla-org/flash-linear-attention")
+    print("pip install --no-use-pep517 flash-linear-attention")
     print("Additionally, ensure you have at least version 2.2.0 of Triton installed:")
     print("pip install triton>=2.2.0")
 
@@ -290,15 +226,6 @@ def rotate_half(x):
     x1 = x[..., : x.shape[-1] // 2]
     x2 = x[..., x.shape[-1] // 2 :]
     return torch.cat((-x2, x1), dim=-1)
-
-# # Copied from transformers.models.mixtral.modeling_mixtral.apply_rotary_pos_emb
-# def apply_rotary_pos_emb(q, k, cos, sin, unsqueeze_dim:int=1):
-#     B, L = q.size(0), q.size(-2)
-#     cos = cos[:L].unsqueeze(0).expand(B,L,-1).unsqueeze(unsqueeze_dim)
-#     sin = sin[:L].unsqueeze(0).expand(B,L,-1).unsqueeze(unsqueeze_dim)
-#     q_embed = (q * cos) + (rotate_half(q) * sin)
-#     k_embed = (k * cos) + (rotate_half(k) * sin)
-#     return q_embed, k_embed
 
 def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
     """Applies Rotary Position Embedding to the query and key tensors.
@@ -440,10 +367,11 @@ class RWKV6Attention(nn.Module):
     ):
         output_shift_state = hidden_states[:, -1:].detach().clone()
 
-        bsz, q_len, hidden_dim = hidden_states.size()
-        H = self.num_heads
-
         x = hidden_states
+
+        B, T, C = hidden_states.shape
+        H = self.num_heads
+        N = self.head_dim
 
         if use_cache and past_key_values is not None and len(past_key_values) > self.layer_idx:
             input_kv_state, input_shift_state = past_key_values[self.layer_idx]
@@ -456,8 +384,8 @@ class RWKV6Attention(nn.Module):
             dxprev = xprev - x
 
             xxx = x + dxprev * self.time_maa_x
-            xxx = torch.tanh(xxx @ self.time_maa_w1).view(bsz*q_len, self.time_maa_w2.size(0), -1).transpose(0, 1)
-            xxx = torch.bmm(xxx, self.time_maa_w2).view(self.time_maa_w2.size(0), bsz, q_len, hidden_dim)
+            xxx = torch.tanh(xxx @ self.time_maa_w1).view(B*T, self.time_maa_w2.size(0), -1).transpose(0, 1)
+            xxx = torch.bmm(xxx, self.time_maa_w2).view(self.time_maa_w2.size(0), B, T, C)
 
             mr, mk, mv, mw, mg = xxx.unbind(dim=0)
             xr = x + dxprev * (self.time_maa_r + mr)
@@ -468,81 +396,54 @@ class RWKV6Attention(nn.Module):
         else:
             xr = xk = xv = xw = xg = x
 
-        query_states = self.q_proj(xr)
-        key_states = self.k_proj(xk)
-        value_states = self.v_proj(xv)
-        decay_states = (self.time_decay + torch.tanh(xw @ self.time_decay_w1) @ self.time_decay_w2).to(query_states.dtype)
+        r = self.q_proj(xr)
+        k = self.k_proj(xk)
+        v = self.v_proj(xv)
+        w_lora_result = (self.time_decay + torch.tanh(xw @ self.time_decay_w1) @ self.time_decay_w2).to(r.dtype)
         if self.config.gate_rank_type == 1:
-            gate_states = torch.sigmoid(self.gate(xg))
+            g = torch.sigmoid(self.gate(xg))
         elif self.config.gate_rank_type == 2:
-            gate_states = torch.sigmoid(xg @ self.g1) @ self.g2
-
-        query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
-        key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
-        value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
-        decay_states = decay_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
+            g = torch.sigmoid(xg @ self.g1) @ self.g2
 
         if position_embeddings is not None:
+            r = r.view(B,T,-1,N)
+            k = k.view(B,T,-1,N)
             cos, sin = position_embeddings
-            query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, unsqueeze_dim=1)
+            r, k = apply_rotary_pos_emb(r, k, cos, sin, unsqueeze_dim=2)
 
         # repeat k/v heads if n_kv_heads < n_heads
-        key_states = repeat_kv(key_states, self.num_key_value_groups)
-        value_states = repeat_kv(value_states, self.num_key_value_groups)
+        k = k.view(B, T, -1, 1, self.head_dim).expand(-1, -1, -1, self.num_key_value_groups, -1).reshape(B, T, -1)
+        v = v.view(B, T, -1, 1, self.head_dim).expand(-1, -1, -1, self.num_key_value_groups, -1).reshape(B, T, -1)
         dropout_rate = 0.0 if not self.training else self.attention_dropout
 
-        decay_states_log = -decay_states.float().exp()
-        decay_states_log = decay_states_log.clamp(-5) # FIXME - is this necessary?
+        log_w = -w_lora_result.float().exp()
+        log_w = log_w.clamp(-5)
         if self.config.balance_state:
-            key_states = (key_states * (1 - decay_states_log.exp())).to(key_states.dtype)
+            k = (k * (1 - log_w.exp())).to(k.dtype)
 
         # dealing with left-padding
         if attention_mask is not None:
-            value_states = value_states * attention_mask[:, None, -value_states.shape[-2]:, None]
+            v = v * attention_mask[:, None, -v.shape[-2]:, None]
 
-        query_states = query_states.to(value_states.dtype)
-        key_states = key_states.to(value_states.dtype)
-
-        # In PEFT, usually we cast the layer norms in float32 for training stability reasons
-        # therefore the input hidden states gets silently casted in float32. Hence, we need
-        # cast them back in float16 just to be sure everything works as expected.
-        input_dtype = query_states.dtype
-        if input_dtype == torch.float32:
-            if torch.is_autocast_enabled():
-                target_dtype = torch.get_autocast_gpu_dtype()
-            # Handle the case where the model is quantized
-            elif hasattr(self.config, "_pre_quantization_dtype"):
-                target_dtype = self.config._pre_quantization_dtype
-            else:
-                target_dtype = self.q_proj.weight.dtype
-
-            logger.warning_once(
-                f"The input hidden states seems to be silently casted in float32, this might be related to"
-                f" the fact you have upcasted embedding or layer norm layers in float32. We will cast back the input in"
-                f" {target_dtype}."
-            )
-
-            query_states = query_states.to(target_dtype)
-            key_states = key_states.to(target_dtype)
-            value_states = value_states.to(target_dtype)
+        r = r.view(B,T,-1,N).to(v.dtype)
+        k = k.view(B,T,-1,N).to(v.dtype)
+        v = v.view(B,T,-1,N)
+        log_w = log_w.view(B,T,-1,N)
 
         attn_weights = torch.empty(0, device=x.device)
 
-        scale = query_states.shape[-1] ** -0.5
+        scale = r.shape[-1] ** -0.5
         output_final_state = not self.training and use_cache and past_key_values is not None
-        #attn_output, output_kv_state = ChunkGLAFunction.apply(query_states, key_states, value_states, decay_states_log.float(), scale, input_kv_state, output_final_state)
-        #attn_output, output_kv_state = chunk_gla(query_states, key_states, value_states, decay_states_log, scale, input_kv_state, output_final_state)
-        attn_output, output_kv_state = fused_recurrent_gla(query_states, key_states, value_states, decay_states_log, None, scale, input_kv_state, output_final_state)
+        attn_output, output_kv_state = fused_recurrent_gla(r, k, v, log_w, None, scale, input_kv_state, output_final_state)
 
         if output_final_state:
-            past_key_values.update(output_kv_state, output_shift_state, q_len, self.layer_idx)
+            past_key_values.update(output_kv_state, output_shift_state, T, self.layer_idx)
 
-        attn_output = attn_output.transpose(1, 2).contiguous()
-        attn_output = attn_output.view(bsz, q_len, -1)
+        attn_output = attn_output.view(B, T, -1)
         if self.config.groupnorm_att:
-            attn_output = self.ln_x(attn_output.view(bsz * q_len, -1)).view(bsz, q_len, -1)
+            attn_output = self.ln_x(attn_output.view(B * T, -1)).view(B, T, -1)
         if self.config.gate_rank_type != 0:
-            attn_output = attn_output * gate_states
+            attn_output = attn_output * g
         attn_output = self.o_proj(attn_output)
 
         return attn_output, attn_weights
