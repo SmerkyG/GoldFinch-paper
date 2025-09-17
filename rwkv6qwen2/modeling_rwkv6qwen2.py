@@ -423,7 +423,7 @@ class RWKV6Attention(nn.Module):
 
         # dealing with left-padding
         if attention_mask is not None:
-            v = v * attention_mask[:, None, -v.shape[-2]:, None]
+            v = v * attention_mask[:, -v.shape[-2]:, None]
 
         r = r.view(B,T,-1,N).to(v.dtype)
         k = k.view(B,T,-1,N).to(v.dtype)
@@ -436,15 +436,15 @@ class RWKV6Attention(nn.Module):
         output_final_state = not self.training and use_cache and past_key_values is not None
         attn_output, output_kv_state = fused_recurrent_gla(r, k, v, log_w, None, scale, input_kv_state, output_final_state)
 
-        if output_final_state:
-            past_key_values.update(output_kv_state, output_shift_state, T, self.layer_idx)
-
         attn_output = attn_output.view(B, T, -1)
         if self.config.groupnorm_att:
             attn_output = self.ln_x(attn_output.view(B * T, -1)).view(B, T, -1)
         if self.config.gate_rank_type != 0:
             attn_output = attn_output * g
         attn_output = self.o_proj(attn_output)
+
+        if output_final_state:
+            past_key_values.update(output_kv_state, output_shift_state, self.layer_idx, T)
 
         return attn_output, attn_weights
     
@@ -680,36 +680,23 @@ class RWKV6Qwen2Model(RWKV6Qwen2PreTrainedModel):
         if (input_ids is None) ^ (inputs_embeds is not None):
             raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
 
-        if self.gradient_checkpointing and self.training:
-            if use_cache:
-                logger.warning_once(
-                    "`use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`..."
-                )
-                use_cache = False
-
-        # kept for BC (non `Cache` `past_key_values` inputs)
-        #return_legacy_cache = False
-        if use_cache and not isinstance(past_key_values, RWKV6State):
-            #return_legacy_cache = True
-            past_key_values = RWKV6State()
-            # if past_key_values is None:
-            #     past_key_values = DynamicCache()
-            # else:
-            #     past_key_values = DynamicCache.from_legacy_cache(past_key_values)
-            #     logger.warning_once(
-            #         "We detected that you are passing `past_key_values` as a tuple of tuples. This is deprecated and "
-            #         "will be removed in v4.47. Please convert your cache or use an appropriate `Cache` class "
-            #         "(https://huggingface.co/docs/transformers/kv_cache#legacy-cache-format)"
-            #     )
+        if self.gradient_checkpointing and self.training and use_cache:
+            logger.warning_once(
+                "`use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`..."
+            )
+            use_cache = False
 
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
 
-        if cache_position is None:
-            past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
-            cache_position = torch.arange(
-                past_seen_tokens, past_seen_tokens + inputs_embeds.shape[1], device=inputs_embeds.device
-            )
+        if use_cache and not isinstance(past_key_values, RWKV6State):
+            past_key_values = RWKV6State()
+
+        #if cache_position is None:
+        past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
+        cache_position = torch.arange(
+            past_seen_tokens, past_seen_tokens + inputs_embeds.shape[1], device=inputs_embeds.device
+        )
 
         if position_ids is None:
             position_ids = cache_position.unsqueeze(0)
@@ -723,9 +710,10 @@ class RWKV6Qwen2Model(RWKV6Qwen2PreTrainedModel):
         hidden_states = inputs_embeds
 
         # create position embeddings to be shared across the decoder layers
-        position_embeddings = None
         if self.config.use_rope:
             position_embeddings = self.rotary_emb(hidden_states, position_ids)
+        else:
+            position_embeddings = None
 
         # decoder layers
         all_hidden_states = () if output_hidden_states else None
@@ -901,41 +889,6 @@ class RWKV6Qwen2ForCausalLM(RWKV6Qwen2PreTrainedModel, GenerationMixin):
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
         )
-
-    def prepare_inputs_for_generation(
-        self,
-        input_ids: torch.LongTensor,
-        past_key_values: Optional[Cache] = None,
-        attention_mask: Optional[torch.LongTensor] = None,
-        inputs_embeds: Optional[torch.FloatTensor] = None,
-        cache_position: Optional[torch.LongTensor] = None,
-        **kwargs,
-    ):
-        # only last token for `inputs_ids` if the `past_key_values` is not empty.
-        if past_key_values is not None and len(past_key_values) > 0:
-            input_ids = input_ids[:, -1:]
-
-        model_inputs = {
-            'past_key_values': past_key_values,
-            'attention_mask': attention_mask,
-            'cache_position': cache_position,
-        }
-        # if `inputs_embeds` are passed, we only want to use them in the 1st generation step
-        if inputs_embeds is not None and past_key_values is None:
-            model_inputs['inputs_embeds'] = inputs_embeds
-        else:
-            # The `contiguous()` here is necessary to have a static stride during decoding. torchdynamo otherwise
-            # recompiles graphs as the stride of the inputs is a guard.
-            # Ref: https://github.com/huggingface/transformers/pull/29114
-            # TODO: use `next_tokens` directly instead.
-            model_inputs['input_ids'] = input_ids.contiguous()
-
-        model_inputs.update(**kwargs)
-
-        # 8. Remove unexpected `generate` inputs (TODO @joao: fix trainer and examples)
-        model_inputs.pop("labels", None)
-
-        return model_inputs        
 
 @add_start_docstrings(
     """
