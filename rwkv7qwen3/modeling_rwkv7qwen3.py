@@ -450,7 +450,7 @@ class Qwen3AttentionAdapted(Qwen3Attention):
         v_first: Optional[torch.Tensor] = None, 
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         attention_mask: Optional[torch.Tensor] = None,
-        past_key_value: Optional[Cache] = None,
+        past_key_values: Optional[Cache] = None,
         cache_position: Optional[torch.LongTensor] = None,
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
@@ -468,10 +468,10 @@ class Qwen3AttentionAdapted(Qwen3Attention):
         cos, sin = position_embeddings
         q, k = apply_rotary_pos_emb(q, k, cos, sin)
 
-        if past_key_value is not None:
+        if past_key_values is not None:
             # sin and cos are specific to RoPE models; cache_position needed for the static cache
             cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
-            k, v = past_key_value.update(k, v, self.layer_idx, cache_kwargs)
+            k, v = past_key_values.update(k, v, self.layer_idx, cache_kwargs)
 
         # repeat k/v heads if n_kv_heads < n_heads
         k = repeat_kv(k, self.num_key_value_groups)
@@ -552,7 +552,7 @@ class Qwen3AttentionVerticalSparse(Qwen3Attention):
         v_first: Optional[torch.Tensor] = None, 
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         attention_mask: Optional[torch.Tensor] = None,
-        past_key_value: Optional[Cache] = None,
+        past_key_values: Optional[Cache] = None,
         cache_position: Optional[torch.LongTensor] = None,
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
@@ -573,20 +573,20 @@ class Qwen3AttentionVerticalSparse(Qwen3Attention):
             cos, sin = position_embeddings
             q, k = apply_rotary_pos_emb(q, k, cos, sin)
 
-        # assert past_key_value is None, "caching is not supported in this model"
-        # if past_key_value is not None:
+        # assert past_key_values is None, "caching is not supported in this model"
+        # if past_key_values is not None:
         #     # sin and cos are specific to RoPE models; cache_position needed for the static cache
         #     cache_kwargs = {"cache_position": cache_position}
-        #     k, v = past_key_value.update(k, v, self.layer_idx, cache_kwargs)
+        #     k, v = past_key_values.update(k, v, self.layer_idx, cache_kwargs)
 
         # repeat k/v heads if n_kv_heads < n_heads
         k = repeat_kv(k, self.num_key_value_groups)
         v = repeat_kv(v, self.num_key_value_groups)
 
-        if past_key_value is not None:
+        if past_key_values is not None:
             # sin and cos are specific to RoPE models; cache_position needed for the static cache
             cache_kwargs = {"cache_position": cache_position}
-            k, v = past_key_value.update(k, v, self.layer_idx, cache_kwargs)
+            k, v = past_key_values.update(k, v, self.layer_idx, cache_kwargs)
 
         S = k.size(-2)
 
@@ -623,12 +623,12 @@ class Qwen3AttentionVerticalSparse(Qwen3Attention):
         s = torch.softmax(s, dim=-1)
         #print(s[0,0])
 
-        if past_key_value is not None:
-            while len(past_key_value.cumulative_scores) <= self.layer_idx:
-                past_key_value.cumulative_scores.append(torch.zeros(B, QH, n_first_tokens, device=q.device, dtype=q.dtype))
-            cumulative_scores = past_key_value.cumulative_scores[self.layer_idx]
-            key_cache = past_key_value.layer_kv_states[self.layer_idx]
-            value_cache = past_key_value.layer_shift_states[self.layer_idx]
+        if past_key_values is not None:
+            while len(past_key_values.cumulative_scores) <= self.layer_idx:
+                past_key_values.cumulative_scores.append(torch.zeros(B, QH, n_first_tokens, device=q.device, dtype=q.dtype))
+            cumulative_scores = past_key_values.cumulative_scores[self.layer_idx]
+            key_cache = past_key_values.layer_kv_states[self.layer_idx]
+            value_cache = past_key_values.layer_shift_states[self.layer_idx]
 
         scores_to_accumulate = s
         if S == L:
@@ -656,7 +656,7 @@ class Qwen3AttentionVerticalSparse(Qwen3Attention):
             # FIXME - handle L > 1 & S != L case
             assert False
           
-        # if past_key_value is not None:
+        # if past_key_values is not None:
         #     scores_to_accumulate = scores_to_accumulate[:, :, -1, -n_first_tokens:] # cut down to last row and last n_first_tokens cols
         #     cumulative_scores += scores_to_accumulate
 
@@ -676,7 +676,7 @@ class Qwen3AttentionVerticalSparse(Qwen3Attention):
         #         assert False
 
         #     # roll cumulative scores left one slot
-        #     past_key_value.cumulative_scores[self.layer_idx] = F.pad(cumulative_scores, [-1, 1])
+        #     past_key_values.cumulative_scores[self.layer_idx] = F.pad(cumulative_scores, [-1, 1])
 
         a = a / (a.sum(-1,keepdim=True) + 1e-8)
         y = a @ v
@@ -697,7 +697,7 @@ class Qwen3AttentionNoPE(Qwen3Attention):
         v_first: Optional[torch.Tensor] = None, 
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         attention_mask: Optional[torch.Tensor] = None,
-        past_key_value: Optional[Cache] = None,
+        past_key_values: Optional[Cache] = None,
         cache_position: Optional[torch.LongTensor] = None,
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
@@ -712,10 +712,10 @@ class Qwen3AttentionNoPE(Qwen3Attention):
         k = self.k_norm(self.k_proj(x).view(hidden_shape)).transpose(1, 2)
         v = self.v_proj(x).view(hidden_shape).transpose(1, 2)
 
-        if past_key_value is not None:
+        if past_key_values is not None:
             # sin and cos are specific to RoPE models; cache_position needed for the static cache
             cache_kwargs = {"cache_position": cache_position}
-            k, v = past_key_value.update(k, v, self.layer_idx, cache_kwargs)
+            k, v = past_key_values.update(k, v, self.layer_idx, cache_kwargs)
 
         # repeat k/v heads if n_kv_heads < n_heads
         k = repeat_kv(k, self.num_key_value_groups)
@@ -723,7 +723,7 @@ class Qwen3AttentionNoPE(Qwen3Attention):
 
         S = k.size(-2)
 
-        y = nn.functional.scaled_dot_product_attention(q, k, v, dropout_p=0.0, attn_mask=attention_mask) #is_causal= L == S)
+        y = nn.functional.scaled_dot_product_attention(q, k, v, dropout_p=0.0, attn_mask=attention_mask, is_causal=attention_mask is None and L==S)
         y = y.transpose(1,2)
         y = y.reshape(*input_shape, -1)#.contiguous()
         y = self.o_proj(y)
@@ -786,7 +786,7 @@ class Qwen3SymPow(Qwen3Attention):
         v_first: Optional[torch.Tensor] = None, 
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
-        past_key_value: Optional[RWKV7State] = None,
+        past_key_values: Optional[RWKV7State] = None,
         output_attentions: bool = False,
         use_cache: bool = False,
         cache_position: Optional[torch.LongTensor] = None,
@@ -803,8 +803,8 @@ class Qwen3SymPow(Qwen3Attention):
 
 
         if self.config.use_tokenshift:
-            if use_cache and past_key_value is not None and len(past_key_value) > self.layer_idx:
-                input_kv_state, input_shift_state = past_key_value[self.layer_idx]
+            if use_cache and past_key_values is not None and len(past_key_values) > self.layer_idx:
+                input_kv_state, input_shift_state = past_key_values[self.layer_idx]
                 xprev = torch.cat([input_shift_state[:, -1:], x[:, :-1]], dim=1)
             else:
                 input_kv_state = None
@@ -840,19 +840,19 @@ class Qwen3SymPow(Qwen3Attention):
             cos, sin = position_embeddings
             q, k = apply_rotary_pos_emb(q, k, cos, sin)
 
-        # if past_key_value is not None:
+        # if past_key_values is not None:
         #     # sin and cos are specific to RoPE models; cache_position needed for the static cache
         #     cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
-        #     k, v = past_key_value.update(k, v, self.layer_idx, cache_kwargs)
+        #     k, v = past_key_values.update(k, v, self.layer_idx, cache_kwargs)
 
-        # if past_key_value is not None:
+        # if past_key_values is not None:
         #     # sin and cos are specific to RoPE models; cache_position needed for the static cache
         #     if position_embeddings is not None:
         #         cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
         #     else:
         #         cache_kwargs = {"cache_position": cache_position}
         #     k_v_logw = torch.cat([k, v, log_w.view(B,L,self.num_key_value_heads,self.num_key_value_groups).transpose(1,2)], dim=-1)
-        #     k_v_logw, output_shift_state = past_key_value.update(k_v_logw, output_shift_state, self.layer_idx, cache_kwargs)
+        #     k_v_logw, output_shift_state = past_key_values.update(k_v_logw, output_shift_state, self.layer_idx, cache_kwargs)
         #     k, v, log_w = torch.split(k_v_logw, [k.size(-1), v.size(-1), self.num_key_value_groups], dim=-1)
         #     log_w = log_w.transpose(1,2).reshape(B,-1,self.num_heads,1)
 
@@ -862,14 +862,14 @@ class Qwen3SymPow(Qwen3Attention):
         k = repeat_kv(k, self.num_key_value_groups)
         v = repeat_kv(v, self.num_key_value_groups)
 
-        if past_key_value is not None:
+        if past_key_values is not None:
             # sin and cos are specific to RoPE models; cache_position needed for the static cache
             if position_embeddings is not None:
                 cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
             else:
                 cache_kwargs = {"cache_position": cache_position}
             k_v_logw = torch.cat([k.float(), v.float(), log_w], dim=-1)
-            k_v_logw, output_shift_state = past_key_value.update(k_v_logw, output_shift_state, self.layer_idx, cache_kwargs)
+            k_v_logw, output_shift_state = past_key_values.update(k_v_logw, output_shift_state, self.layer_idx, cache_kwargs)
             k, v, log_w = torch.split(k_v_logw, [k.size(-1), v.size(-1), 1], dim=-1)
             k = k.to(q.dtype)
             v = v.to(q.dtype)
@@ -974,20 +974,20 @@ class Qwen3SymPow(Qwen3Attention):
         # log_w = -decay_states.float().exp()
         # log_w = log_w.clamp(-5) # FIXME - is this necessary?
 
-        # if past_key_value is not None:
+        # if past_key_values is not None:
         #     # sin and cos are specific to RoPE models; cache_position needed for the static cache
         #     if position_embeddings is not None:
         #         cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
         #     else:
         #         cache_kwargs = {"cache_position": cache_position}
         #     k_v_logw = torch.cat([k, v, log_w], dim=-1)
-        #     k_v_logw, output_shift_state = past_key_value.update(k_v_logw, output_shift_state, self.layer_idx, cache_kwargs)
+        #     k_v_logw, output_shift_state = past_key_values.update(k_v_logw, output_shift_state, self.layer_idx, cache_kwargs)
         #     k, v, log_w = torch.split(k_v_logw, [k.size(-1), v.size(-1), log_w.size(-1)], dim=-1)
 
-        if past_key_value is not None:
+        if past_key_values is not None:
             # sin and cos are specific to RoPE models; cache_position needed for the static cache
             cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
-            k, v = past_key_value.update(k, v, self.layer_idx, cache_kwargs)
+            k, v = past_key_values.update(k, v, self.layer_idx, cache_kwargs)
 
         S = k.size(-2)
 
@@ -1045,7 +1045,7 @@ class Qwen3SWA(Qwen3Attention):
         v_first: Optional[torch.Tensor] = None, 
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         attention_mask: Optional[torch.Tensor] = None,
-        past_key_value: Optional[Cache] = None,
+        past_key_values: Optional[Cache] = None,
         cache_position: Optional[torch.LongTensor] = None,
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
@@ -1063,10 +1063,10 @@ class Qwen3SWA(Qwen3Attention):
         cos, sin = position_embeddings
         q, k = apply_rotary_pos_emb(q, k, cos, sin)
 
-        if past_key_value is not None:
+        if past_key_values is not None:
             # sin and cos are specific to RoPE models; cache_position needed for the static cache
             cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
-            k, v = past_key_value.update(k, v, self.layer_idx, cache_kwargs)
+            k, v = past_key_values.update(k, v, self.layer_idx, cache_kwargs)
 
         # repeat k/v heads if n_kv_heads < n_heads
         k = repeat_kv(k, self.num_key_value_groups)
@@ -1095,7 +1095,7 @@ class Qwen3SWASink(Qwen3Attention):
         v_first: Optional[torch.Tensor] = None, 
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         attention_mask: Optional[torch.Tensor] = None,
-        past_key_value: Optional[Cache] = None,
+        past_key_values: Optional[Cache] = None,
         cache_position: Optional[torch.LongTensor] = None,
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
@@ -1113,10 +1113,10 @@ class Qwen3SWASink(Qwen3Attention):
         cos, sin = position_embeddings
         q, k = apply_rotary_pos_emb(q, k, cos, sin)
 
-        if past_key_value is not None:
+        if past_key_values is not None:
             # sin and cos are specific to RoPE models; cache_position needed for the static cache
             cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
-            k, v = past_key_value.update(k, v, self.layer_idx, cache_kwargs)
+            k, v = past_key_values.update(k, v, self.layer_idx, cache_kwargs)
 
         # repeat k/v heads if n_kv_heads < n_heads
         k = repeat_kv(k, self.num_key_value_groups)
@@ -1146,7 +1146,7 @@ class Qwen3DropoutSWASink(Qwen3Attention):
         v_first: Optional[torch.Tensor] = None, 
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         attention_mask: Optional[torch.Tensor] = None,
-        past_key_value: Optional[Cache] = None,
+        past_key_values: Optional[Cache] = None,
         cache_position: Optional[torch.LongTensor] = None,
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
@@ -1164,10 +1164,10 @@ class Qwen3DropoutSWASink(Qwen3Attention):
         cos, sin = position_embeddings
         q, k = apply_rotary_pos_emb(q, k, cos, sin)
 
-        if past_key_value is not None:
+        if past_key_values is not None:
             # sin and cos are specific to RoPE models; cache_position needed for the static cache
             cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
-            k, v = past_key_value.update(k, v, self.layer_idx, cache_kwargs)
+            k, v = past_key_values.update(k, v, self.layer_idx, cache_kwargs)
 
         # repeat k/v heads if n_kv_heads < n_heads
         k = repeat_kv(k, self.num_key_value_groups)
@@ -1204,7 +1204,7 @@ class Qwen3MOBA(Qwen3Attention):
         v_first: Optional[torch.Tensor] = None, 
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         attention_mask: Optional[torch.Tensor] = None,
-        past_key_value: Optional[Cache] = None,
+        past_key_values: Optional[Cache] = None,
         cache_position: Optional[torch.LongTensor] = None,
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
@@ -1222,10 +1222,10 @@ class Qwen3MOBA(Qwen3Attention):
         cos, sin = position_embeddings
         q, k = apply_rotary_pos_emb(q, k, cos, sin)
 
-        if past_key_value is not None:
+        if past_key_values is not None:
             # sin and cos are specific to RoPE models; cache_position needed for the static cache
             cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
-            k, v = past_key_value.update(k, v, self.layer_idx, cache_kwargs)
+            k, v = past_key_values.update(k, v, self.layer_idx, cache_kwargs)
 
         # repeat k/v heads if n_kv_heads < n_heads
         k = repeat_kv(k, self.num_key_value_groups)
@@ -1325,7 +1325,7 @@ class Qwen3Power(Qwen3Attention):
         v_first: Optional[torch.Tensor] = None, 
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         attention_mask: Optional[torch.Tensor] = None,
-        past_key_value: Optional[Cache] = None,
+        past_key_values: Optional[Cache] = None,
         cache_position: Optional[torch.LongTensor] = None,
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
@@ -1343,10 +1343,10 @@ class Qwen3Power(Qwen3Attention):
         cos, sin = position_embeddings
         q, k = apply_rotary_pos_emb(q, k, cos, sin)
 
-        if past_key_value is not None:
+        if past_key_values is not None:
             # sin and cos are specific to RoPE models; cache_position needed for the static cache
             cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
-            k, v = past_key_value.update(k, v, self.layer_idx, cache_kwargs)
+            k, v = past_key_values.update(k, v, self.layer_idx, cache_kwargs)
 
         # repeat k/v heads if n_kv_heads < n_heads
         k = repeat_kv(k, self.num_key_value_groups)
@@ -1386,7 +1386,7 @@ class Qwen3Chunk(Qwen3Attention):
         v_first: Optional[torch.Tensor] = None, 
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         attention_mask: Optional[torch.Tensor] = None,
-        past_key_value: Optional[Cache] = None,
+        past_key_values: Optional[Cache] = None,
         cache_position: Optional[torch.LongTensor] = None,
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
@@ -1404,10 +1404,10 @@ class Qwen3Chunk(Qwen3Attention):
         cos, sin = position_embeddings
         q, k = apply_rotary_pos_emb(q, k, cos, sin)
 
-        if past_key_value is not None:
+        if past_key_values is not None:
             # sin and cos are specific to RoPE models; cache_position needed for the static cache
             cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
-            k, v = past_key_value.update(k, v, self.layer_idx, cache_kwargs)
+            k, v = past_key_values.update(k, v, self.layer_idx, cache_kwargs)
 
         # repeat k/v heads if n_kv_heads < n_heads
         k = repeat_kv(k, self.num_key_value_groups)
@@ -1451,7 +1451,7 @@ class Qwen3SWAPrefill(Qwen3Attention):
         v_first: Optional[torch.Tensor] = None, 
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         attention_mask: Optional[torch.Tensor] = None,
-        past_key_value: Optional[Cache] = None,
+        past_key_values: Optional[Cache] = None,
         cache_position: Optional[torch.LongTensor] = None,
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
@@ -1469,10 +1469,10 @@ class Qwen3SWAPrefill(Qwen3Attention):
         cos, sin = position_embeddings
         q, k = apply_rotary_pos_emb(q, k, cos, sin)
 
-        if past_key_value is not None:
+        if past_key_values is not None:
             # sin and cos are specific to RoPE models; cache_position needed for the static cache
             cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
-            k, v = past_key_value.update(k, v, self.layer_idx, cache_kwargs)
+            k, v = past_key_values.update(k, v, self.layer_idx, cache_kwargs)
 
         # repeat k/v heads if n_kv_heads < n_heads
         k = repeat_kv(k, self.num_key_value_groups)
@@ -1568,7 +1568,7 @@ class Qwen3KeyQuant(Qwen3Attention):
         v_first: Optional[torch.Tensor] = None, 
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         attention_mask: Optional[torch.Tensor] = None,
-        past_key_value: Optional[Cache] = None,
+        past_key_values: Optional[Cache] = None,
         cache_position: Optional[torch.LongTensor] = None,
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
@@ -1599,30 +1599,30 @@ class Qwen3KeyQuant(Qwen3Attention):
         #     k = (k_fp8_quant.to(k) * k_fp8_scale).to(k)
 
         # if quant_rope:
-        #     if past_key_value is not None:
+        #     if past_key_values is not None:
         #         # sin and cos are specific to RoPE models; cache_position needed for the static cache
         #         cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
-        #         k, v = past_key_value.update(k, v, self.layer_idx, cache_kwargs)
+        #         k, v = past_key_values.update(k, v, self.layer_idx, cache_kwargs)
         # else:
         #     cos, sin = position_embeddings
 
         #     # q = apply_rotary_pos_emb_single(q, cos, sin)
 
-        #     if past_key_value is not None:
+        #     if past_key_values is not None:
         #         # sin and cos are specific to RoPE models; cache_position needed for the static cache
         #         cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
-        #         k, v = past_key_value.update(k, v, self.layer_idx, cache_kwargs)
+        #         k, v = past_key_values.update(k, v, self.layer_idx, cache_kwargs)
 
         #         # update cos, sin
-        #         #while len(past_key_value.cos) <= self.layer_idx:
-        #         #    past_key_value.cos.append(torch.tensor([], dtype=cos.dtype, device=cos.device))
-        #         #    past_key_value.sin.append(torch.tensor([], dtype=sin.dtype, device=sin.device))
-        #         if len(past_key_value.cos) <= self.layer_idx:
-        #             past_key_value.cos.append(cos)
-        #             past_key_value.sin.append(sin)
+        #         #while len(past_key_values.cos) <= self.layer_idx:
+        #         #    past_key_values.cos.append(torch.tensor([], dtype=cos.dtype, device=cos.device))
+        #         #    past_key_values.sin.append(torch.tensor([], dtype=sin.dtype, device=sin.device))
+        #         if len(past_key_values.cos) <= self.layer_idx:
+        #             past_key_values.cos.append(cos)
+        #             past_key_values.sin.append(sin)
         #         else:
-        #             cos = past_key_value.cos[self.layer_idx] = torch.cat([past_key_value.cos[self.layer_idx], cos], dim=-2)
-        #             sin = past_key_value.sin[self.layer_idx] = torch.cat([past_key_value.sin[self.layer_idx], sin], dim=-2)
+        #             cos = past_key_values.cos[self.layer_idx] = torch.cat([past_key_values.cos[self.layer_idx], cos], dim=-2)
+        #             sin = past_key_values.sin[self.layer_idx] = torch.cat([past_key_values.sin[self.layer_idx], sin], dim=-2)
 
         #     q = apply_rotary_pos_emb_single(q, cos[..., -L:, :], sin[..., -L:, :])
         #     k = apply_rotary_pos_emb_single(k, cos, sin)
@@ -1638,8 +1638,8 @@ class Qwen3KeyQuant(Qwen3Attention):
         # v = v_fp8_quant.float() * v_fp8_scale # this forces us to store cache in float format, tho its what you'd get anyway when dequanting
         # v = v.bfloat16()
 
-        if past_key_value is not None:
-            seq_len_seen = past_key_value.layer_kv_states[self.layer_idx].size(-2) if len(past_key_value.layer_kv_states) > self.layer_idx else 0
+        if past_key_values is not None:
+            seq_len_seen = past_key_values.layer_kv_states[self.layer_idx].size(-2) if len(past_key_values.layer_kv_states) > self.layer_idx else 0
             S = seq_len_seen + L
         else:
             S = k.size(-2)
@@ -1670,21 +1670,21 @@ class Qwen3KeyQuant(Qwen3Attention):
 
         q = apply_rotary_pos_emb_single(q, cos, sin)
 
-        if past_key_value is not None:
+        if past_key_values is not None:
             # sin and cos are specific to RoPE models; cache_position needed for the static cache
             cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
-            k, v = past_key_value.update(k, v, self.layer_idx, cache_kwargs)
+            k, v = past_key_values.update(k, v, self.layer_idx, cache_kwargs)
 
             # update cos, sin
-            # while len(past_key_value.cos) <= self.layer_idx:
-            #     past_key_value.cos.append(torch.tensor([], device=cos.device))            
-            #     past_key_value.sin.append(torch.tensor([], device=sin.device))
-            if len(past_key_value.cos) <= self.layer_idx:
-                past_key_value.cos.append(cos)
-                past_key_value.sin.append(sin)
+            # while len(past_key_values.cos) <= self.layer_idx:
+            #     past_key_values.cos.append(torch.tensor([], device=cos.device))            
+            #     past_key_values.sin.append(torch.tensor([], device=sin.device))
+            if len(past_key_values.cos) <= self.layer_idx:
+                past_key_values.cos.append(cos)
+                past_key_values.sin.append(sin)
             else:
-                cos = past_key_value.cos[self.layer_idx] = torch.cat([past_key_value.cos[self.layer_idx], cos], dim=-2)
-                sin = past_key_value.sin[self.layer_idx] = torch.cat([past_key_value.sin[self.layer_idx], sin], dim=-2)
+                cos = past_key_values.cos[self.layer_idx] = torch.cat([past_key_values.cos[self.layer_idx], cos], dim=-2)
+                sin = past_key_values.sin[self.layer_idx] = torch.cat([past_key_values.sin[self.layer_idx], sin], dim=-2)
 
         k = apply_rotary_pos_emb_single(k, cos, sin)
         q, k = q.to(v), k.to(v)
@@ -1764,7 +1764,7 @@ class Qwen3DoubleAttention(Qwen3Attention):
         v_first: Optional[torch.Tensor] = None, 
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         attention_mask: Optional[torch.Tensor] = None,
-        past_key_value: Optional[Cache] = None,
+        past_key_values: Optional[Cache] = None,
         cache_position: Optional[torch.LongTensor] = None,
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
@@ -1789,10 +1789,10 @@ class Qwen3DoubleAttention(Qwen3Attention):
         cos, sin = position_embeddings
         q, k = apply_rotary_pos_emb(q, k, cos, sin)
 
-        if past_key_value is not None:
+        if past_key_values is not None:
             # sin and cos are specific to RoPE models; cache_position needed for the static cache
             cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
-            k, v = past_key_value.update(k, v, self.layer_idx, cache_kwargs)
+            k, v = past_key_values.update(k, v, self.layer_idx, cache_kwargs)
 
         # repeat k/v heads if n_kv_heads < n_heads
         k = repeat_kv(k, self.num_key_value_groups)
@@ -1889,7 +1889,7 @@ class Qwen3NewAttention(Qwen3Attention):
         v_first: Optional[torch.Tensor] = None, 
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         attention_mask: Optional[torch.Tensor] = None,
-        past_key_value: Optional[Cache] = None,
+        past_key_values: Optional[Cache] = None,
         cache_position: Optional[torch.LongTensor] = None,
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
@@ -1925,10 +1925,10 @@ class Qwen3NewAttention(Qwen3Attention):
         cos, sin = position_embeddings
         q, k = apply_rotary_pos_emb(q, k, cos, sin)
 
-        if past_key_value is not None:
+        if past_key_values is not None:
             # sin and cos are specific to RoPE models; cache_position needed for the static cache
             cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
-            k, v = past_key_value.update(k, v, self.layer_idx, cache_kwargs)
+            k, v = past_key_values.update(k, v, self.layer_idx, cache_kwargs)
 
         attention_interface: Callable = eager_attention_forward
         if self.config._attn_implementation != "eager":
@@ -2041,7 +2041,7 @@ class RWKV7Attention(nn.Module):
         v_first: Optional[torch.Tensor] = None, 
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
-        past_key_value: Optional[RWKV7State] = None,
+        past_key_values: Optional[RWKV7State] = None,
         output_attentions: bool = False,
         use_cache: bool = False,
         cache_position: Optional[torch.LongTensor] = None,
@@ -2065,8 +2065,8 @@ class RWKV7Attention(nn.Module):
         N = self.head_dim
         q_len = T
 
-        if use_cache and past_key_value is not None and len(past_key_value) > self.layer_idx:
-            input_vk_state, input_shift_state = past_key_value[self.layer_idx]
+        if use_cache and past_key_values is not None and len(past_key_values) > self.layer_idx:
+            input_vk_state, input_shift_state = past_key_values[self.layer_idx]
         else:
             input_vk_state, input_shift_state = torch.zeros(B,H,N,N, dtype=torch.float32,device=x.device), torch.zeros_like(x[:, -1:])
 
@@ -2135,8 +2135,8 @@ class RWKV7Attention(nn.Module):
             x = x * g
         x = self.o_proj(x)
 
-        if past_key_value is not None:
-            past_key_value.update(output_vk_state, output_shift_state, self.layer_idx, q_len, is_layer_attention(self.config, self.layer_idx))
+        if past_key_values is not None:
+            past_key_values.update(output_vk_state, output_shift_state, self.layer_idx, q_len, is_layer_attention(self.config, self.layer_idx))
 
         return x, v_first
     
@@ -2165,7 +2165,7 @@ class RWKV7Qwen3DecoderLayer(nn.Module):
         v_first: Optional[torch.Tensor],
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
-        past_key_value: Optional[Cache] = None,
+        past_key_values: Optional[Cache] = None,
         output_attentions: Optional[bool] = False,
         use_cache: Optional[bool] = False,
         cache_position: Optional[torch.LongTensor] = None,
@@ -2183,7 +2183,7 @@ class RWKV7Qwen3DecoderLayer(nn.Module):
             v_first=v_first,
             attention_mask=attention_mask,
             position_ids=position_ids,
-            past_key_value=past_key_value,
+            past_key_values=past_key_values,
             output_attentions=output_attentions,
             use_cache=use_cache,
             cache_position=cache_position,
@@ -2268,12 +2268,6 @@ class RWKV7Qwen3Model(RWKV7Qwen3PreTrainedModel):
         # Initialize weights and apply final processing
         self.post_init()
 
-    def get_input_embeddings(self):
-        return self.embed_tokens
-
-    def set_input_embeddings(self, value):
-        self.embed_tokens = value
-
     #@check_model_inputs
     @auto_docstring
     def forward(
@@ -2286,7 +2280,6 @@ class RWKV7Qwen3Model(RWKV7Qwen3PreTrainedModel):
         use_cache: Optional[bool] = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
-        return_dict: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
         **kwargs: Unpack[TransformersKwargs],
     ) -> Union[Tuple, BaseModelOutputWithPast]:
@@ -2295,8 +2288,6 @@ class RWKV7Qwen3Model(RWKV7Qwen3PreTrainedModel):
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         )
         use_cache = use_cache if use_cache is not None else self.config.use_cache
-
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
         if (input_ids is None) ^ (inputs_embeds is not None):
             raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
@@ -2321,13 +2312,6 @@ class RWKV7Qwen3Model(RWKV7Qwen3PreTrainedModel):
 
         if position_ids is None:
             position_ids = cache_position.unsqueeze(0)
-
-        # if self.config.num_attention_layers > 0:
-        #     causal_mask = self._update_causal_mask(
-        #         attention_mask, inputs_embeds, cache_position, past_key_values, output_attentions
-        #     )
-        # else:
-        #     causal_mask = None
 
         # It may already have been prepared by e.g. `generate`
         if not isinstance(causal_mask_mapping := attention_mask, dict):
@@ -2378,7 +2362,7 @@ class RWKV7Qwen3Model(RWKV7Qwen3PreTrainedModel):
                 frozen_residual=frozen_residual,
                 attention_mask=attention_mask,
                 position_ids=position_ids,
-                past_key_value=past_key_values,
+                past_key_values=past_key_values,
                 output_attentions=output_attentions,
                 use_cache=use_cache,
                 cache_position=cache_position,
@@ -2401,11 +2385,9 @@ class RWKV7Qwen3Model(RWKV7Qwen3PreTrainedModel):
         #if return_legacy_cache:
         #    next_cache = next_cache.to_legacy_cache()
 
-        if not return_dict:
-            return tuple(v for v in [hidden_states, past_key_values, all_hidden_states, all_self_attns] if v is not None)
         return BaseModelOutputWithPast(
             last_hidden_state=hidden_states,
-            past_key_values=past_key_values,
+            past_key_values=past_key_values if use_cache else None,
             hidden_states=all_hidden_states,
             attentions=all_self_attns,
         )
@@ -2422,12 +2404,6 @@ class RWKV7Qwen3ForCausalLM(RWKV7Qwen3PreTrainedModel, GenerationMixin):
         # Initialize weights and apply final processing
         self.post_init()
 
-    def set_decoder(self, decoder):
-        self.model = decoder
-
-    def get_decoder(self):
-        return self.model
-
     @can_return_tuple
     @auto_docstring
     def forward(
@@ -2441,9 +2417,8 @@ class RWKV7Qwen3ForCausalLM(RWKV7Qwen3PreTrainedModel, GenerationMixin):
         use_cache: Optional[bool] = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
-        return_dict: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
-        num_logits_to_keep: int = 0,
+        logits_to_keep: Union[int, torch.Tensor] = 0,
         **loss_kwargs,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         r"""
@@ -2477,44 +2452,42 @@ class RWKV7Qwen3ForCausalLM(RWKV7Qwen3PreTrainedModel, GenerationMixin):
         "Hey, are you conscious? Can you talk to me?\nI'm not conscious, but I can talk to you."
         ```"""
 
-        # run the prefill only up to the last token, then run one more for the actual result
-        # we do this so that called code doesn't have to handle the dichotomy specially and can just check for L==1
-        for i in range(2):
-            all_but_one = max(1, input_ids.size(-1)-1)
-            iid = input_ids[..., i*all_but_one:(i+1)*all_but_one]
-            if iid.size(-1) == 0: 
-                continue
-            pids = position_ids
-            if pids is not None:
-                pids = position_ids[..., i*all_but_one:(i+1)*all_but_one]
-            cp = cache_position
-            if cp is not None:
-                cp = cache_position[..., i*all_but_one:(i+1)*all_but_one]
-            rv = self.forward_inner(iid, attention_mask=attention_mask, position_ids=pids, past_key_values=past_key_values, inputs_embeds=inputs_embeds, labels=labels, use_cache=use_cache, output_attentions=output_attentions, output_hidden_states=output_hidden_states, return_dict=True, cache_position=cp, num_logits_to_keep=num_logits_to_keep, **loss_kwargs)
-            past_key_values = rv.past_key_values
-        return rv
+        # # run the prefill only up to the last token, then run one more for the actual result
+        # # we do this so that called code doesn't have to handle the dichotomy specially and can just check for L==1
+        # for i in range(2):
+        #     all_but_one = max(1, input_ids.size(-1)-1)
+        #     iid = input_ids[..., i*all_but_one:(i+1)*all_but_one]
+        #     if iid.size(-1) == 0: 
+        #         continue
+        #     pids = position_ids
+        #     if pids is not None:
+        #         pids = position_ids[..., i*all_but_one:(i+1)*all_but_one]
+        #     cp = cache_position
+        #     if cp is not None:
+        #         cp = cache_position[..., i*all_but_one:(i+1)*all_but_one]
+        #     rv = self.forward_inner(iid, attention_mask=attention_mask, position_ids=pids, past_key_values=past_key_values, inputs_embeds=inputs_embeds, labels=labels, use_cache=use_cache, output_attentions=output_attentions, output_hidden_states=output_hidden_states, cache_position=cp, num_logits_to_keep=num_logits_to_keep, **loss_kwargs)
+        #     past_key_values = rv.past_key_values
+    #     return rv
 
-    def forward_inner(
-        self,
-        input_ids: torch.LongTensor = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.LongTensor] = None,
-        past_key_values: Optional[List[torch.FloatTensor]] = None,
-        inputs_embeds: Optional[torch.FloatTensor] = None,
-        labels: Optional[torch.LongTensor] = None,
-        use_cache: Optional[bool] = None,
-        output_attentions: Optional[bool] = None,
-        output_hidden_states: Optional[bool] = None,
-        return_dict: Optional[bool] = None,
-        cache_position: Optional[torch.LongTensor] = None,
-        num_logits_to_keep: int = 0,
-        **loss_kwargs,
-    ) -> Union[Tuple, CausalLMOutputWithPast]:
+    # def forward_inner(
+    #     self,
+    #     input_ids: torch.LongTensor = None,
+    #     attention_mask: Optional[torch.Tensor] = None,
+    #     position_ids: Optional[torch.LongTensor] = None,
+    #     past_key_values: Optional[List[torch.FloatTensor]] = None,
+    #     inputs_embeds: Optional[torch.FloatTensor] = None,
+    #     labels: Optional[torch.LongTensor] = None,
+    #     use_cache: Optional[bool] = None,
+    #     output_attentions: Optional[bool] = None,
+    #     output_hidden_states: Optional[bool] = None,
+    #     cache_position: Optional[torch.LongTensor] = None,
+    #     num_logits_to_keep: int = 0,
+    #     **loss_kwargs,
+    # ) -> Union[Tuple, CausalLMOutputWithPast]:
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         )
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
         # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
         outputs = self.model(
@@ -2526,21 +2499,17 @@ class RWKV7Qwen3ForCausalLM(RWKV7Qwen3PreTrainedModel, GenerationMixin):
             use_cache=use_cache,
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
-            return_dict=return_dict,
             cache_position=cache_position,
         )
 
-        hidden_states = outputs[0]
+        hidden_states = outputs.last_hidden_state
         # Only compute necessary logits, and do not upcast them to float if we are not computing the loss
-        logits = self.lm_head(hidden_states[:, -num_logits_to_keep:, :])
+        slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
+        logits = self.lm_head(hidden_states[:, slice_indices, :])
 
         loss = None
         if labels is not None:
-            loss = self.loss_function(logits, labels, self.vocab_size, **loss_kwargs)
-
-        if not return_dict:
-            output = (logits,) + outputs[1:]
-            return (loss,) + output if loss is not None else output
+            loss = self.loss_function(logits=logits, labels=labels, vocab_size=self.vocab_size, **loss_kwargs)
 
         return CausalLMOutputWithPast(
             loss=loss,
