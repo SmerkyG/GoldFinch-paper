@@ -62,6 +62,8 @@ os.environ["RWKV_HEAD_SIZE_A"] = str(config.model.head_size)
 attention_type = str(config.model.attention_type)
 if 'rwkv7' in attention_type:
     attention_type = 'rwkv7_fla_fused_recurrent'
+if 'rwkv6' in attention_type:
+    attention_type = 'gla'
 os.environ["RWKV_ATTENTION_TYPE"] = attention_type
 
 model_path = config.path
