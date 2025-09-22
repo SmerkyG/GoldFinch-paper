@@ -14,7 +14,7 @@
 # limitations under the License.
 """RWKV7Qwen3 model configuration"""
 
-from transformers.configuration_utils import PretrainedConfig
+from transformers.configuration_utils import PretrainedConfig, layer_type_validation
 from transformers.modeling_rope_utils import rope_config_validation
 from transformers.utils import logging
 
@@ -162,9 +162,11 @@ class RWKV7Qwen3Config(PretrainedConfig):
         use_sliding_window=False,
         sliding_window=4096,
         max_window_layers=28,
-        num_attention_layers=0,
+        first_attention_layer=9999,
+        first_post_attention_layer=9999,
         attention_striping=1,
         last_striping_layer=99999,
+        layer_types=None,
         attention_dropout=0.0,
         attention_bias=True,
         attention_output_bias=False,
@@ -183,7 +185,8 @@ class RWKV7Qwen3Config(PretrainedConfig):
         self.use_sliding_window = use_sliding_window
         self.sliding_window = sliding_window if use_sliding_window else None
         self.max_window_layers = max_window_layers
-        self.num_attention_layers = num_attention_layers
+        self.first_attention_layer = first_attention_layer
+        self.first_post_attention_layer = first_post_attention_layer
         self.attention_striping = attention_striping
         self.last_striping_layer = last_striping_layer
 
@@ -210,6 +213,16 @@ class RWKV7Qwen3Config(PretrainedConfig):
         if self.rope_scaling is not None and "type" in self.rope_scaling:
             self.rope_scaling["rope_type"] = self.rope_scaling["type"]
         rope_config_validation(self)
+
+        self.layer_types = layer_types
+        if self.layer_types is None:
+            self.layer_types = [
+                "sliding_attention"
+                if self.sliding_window is not None and i >= self.max_window_layers
+                else "full_attention"
+                for i in range(self.num_hidden_layers)
+            ]
+        layer_type_validation(self.layer_types)
 
         self.attention_bias = attention_bias
         self.attention_output_bias = attention_output_bias

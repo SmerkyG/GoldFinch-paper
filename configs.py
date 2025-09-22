@@ -22,6 +22,7 @@ class Model_Config:
     dropout:float = 0.0
     inv_other_layer_ratio:float = 1
     preserve_last_n_layers:int = 0
+    replace_last_n_layers:int = 0
     attention_striping:int = 1
     last_striping_layer:int = 99999
     kv_cache_compression_ratio:float = 16
@@ -73,6 +74,8 @@ class Transformer_Config(Model_Config):
     groupnorm_att:int = 1
 
     use_tokenshift:int = 1
+
+    phi:str = ''
 
 @dataclass(kw_only=True)
 class FinchC2_Config(Transformer_Config):

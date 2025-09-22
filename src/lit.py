@@ -242,7 +242,7 @@ class LightningModelWrapper(pl.LightningModule):
             # post-loading reset of parameters, if needed
             if self.config.train is not None:
                 if self.config.train.load_model == '' or (self.config.train.load_partial and self.config.train.attention_distillation_stage in (0,1)):
-                    print("Resetting parameters")
+                    print("Resetting parameters after load")
                     for submodule in self.model.modules():
                         if hasattr(submodule, 'reset_parameters_after_load'):
                             submodule.reset_parameters_after_load()
