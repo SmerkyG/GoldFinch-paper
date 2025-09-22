@@ -58,7 +58,7 @@ logger = logging.get_logger(__name__)
 _CHECKPOINT_FOR_DOC = "recursal/QRWKV7-7B-Instruct-Preview-v0.1"
 _CONFIG_FOR_DOC = "RWKV7Qwen2Config"
 
-class RWKV7State(Cache):
+class RWKV7State():
     def __init__(self) -> None:
         super().__init__()
         self._seen_tokens = 0  # Used in `generate` to keep tally of how many tokens the cache has seen
@@ -319,7 +319,7 @@ class RWKV7Attention(nn.Module):
         v_first: Optional[torch.Tensor] = None, 
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
-        past_key_value: Optional[RWKV7State] = None,
+        past_key_values: Optional[RWKV7State] = None,
         output_attentions: bool = False,
         use_cache: bool = False,
         cache_position: Optional[torch.LongTensor] = None,
@@ -341,8 +341,8 @@ class RWKV7Attention(nn.Module):
         N = self.head_dim
         q_len = T
 
-        if use_cache and past_key_value is not None and len(past_key_value) > self.layer_idx:
-            input_vk_state, input_shift_state = past_key_value[self.layer_idx]
+        if use_cache and past_key_values is not None and len(past_key_values) > self.layer_idx:
+            input_vk_state, input_shift_state = past_key_values[self.layer_idx]
         else:
             input_vk_state, input_shift_state = torch.zeros(B,H,N,N, dtype=torch.float32,device=x.device), torch.zeros_like(x[:, -1:])
 
@@ -428,8 +428,8 @@ class RWKV7Attention(nn.Module):
         # x = x + ((r.view(B,T,H,-1)*k.view(B,T,H,-1)*self.r_k).sum(dim=-1, keepdim=True) * v.view(B,T,H,-1)).view(B,T,C)
         x = self.o_proj(x * g)
 
-        if past_key_value is not None:
-            past_key_value.update(output_vk_state, output_shift_state, self.layer_idx, q_len)
+        if past_key_values is not None:
+            past_key_values.update(output_vk_state, output_shift_state, self.layer_idx, q_len)
 
         return x, v_first
     
@@ -453,7 +453,7 @@ class RWKV7Qwen2DecoderLayer(nn.Module):
         v_first: Optional[torch.Tensor],
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
-        past_key_value: Optional[Cache] = None,
+        past_key_values: Optional[Cache] = None,
         output_attentions: Optional[bool] = False,
         use_cache: Optional[bool] = False,
         cache_position: Optional[torch.LongTensor] = None,
@@ -470,7 +470,7 @@ class RWKV7Qwen2DecoderLayer(nn.Module):
             v_first=v_first,
             attention_mask=attention_mask,
             position_ids=position_ids,
-            past_key_value=past_key_value,
+            past_key_values=past_key_values,
             output_attentions=output_attentions,
             use_cache=use_cache,
             cache_position=cache_position,
