@@ -174,6 +174,9 @@ class RWKV7Qwen3Config(PretrainedConfig):
         balance_state=True,
         groupnorm_att=False,
         use_tokenshift=False,
+        use_k_first=False,
+        v_first_pre_gqa=False,
+        use_bonus=False,
         **kwargs,
     ):
         self.vocab_size = vocab_size
@@ -230,6 +233,9 @@ class RWKV7Qwen3Config(PretrainedConfig):
         self.balance_state = balance_state
         self.groupnorm_att = groupnorm_att
         self.use_tokenshift = use_tokenshift
+        self.use_k_first = use_k_first
+        self.v_first_pre_gqa = v_first_pre_gqa
+        self.use_bonus = use_bonus
 
         super().__init__(
             tie_word_embeddings=tie_word_embeddings,

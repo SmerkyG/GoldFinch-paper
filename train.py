@@ -135,7 +135,7 @@ if __name__ == "__main__":
     )
     rank_zero_info(str(vars(config)) + "\n")
 
-    assert config.train.data_type in ["utf-8", "utf-16le", "numpy", "binidx", "dummy", "uint16"]
+    assert config.train.data_type in ["utf-8", "utf-16le", "numpy", "binidx", "dummy", "uint16", 'jsonl']
 
     assert config.train.precision in ["32", "tf32", "16", "16-true", "16-mixed", "bf16", "bf16-true", "bf16-mixed"]
     os.environ["RWKV_FLOAT_MODE"] = config.train.precision
@@ -194,7 +194,7 @@ if __name__ == "__main__":
 
     # FIXME - why use_distributed_sampler=False? was this an oversight in the original repo? is this related to replace_sampler_ddp from Bo's code?
     trainer = Trainer(
-                        use_distributed_sampler=False, 
+                        use_distributed_sampler=config.train.data_type == 'jsonl',
                         enable_checkpointing=False,
                         num_sanity_val_steps=0,
                         logger=False,
@@ -354,20 +354,57 @@ if __name__ == "__main__":
         trainer.strategy.config["zero_optimization"]["allgather_bucket_size"] = config.train.ds_bucket_mb * 1000 * 1000
         trainer.strategy.config["zero_optimization"]["reduce_bucket_size"] = config.train.ds_bucket_mb * 1000 * 1000
 
-    train_data = MyDataset(config, trainer)
-    if config.train.validation_data_file != "":
-        validation_data = MMapDataset(config.train.validation_data_file, config.model.ctx_len)
-    config.model.vocab_size = train_data.vocab_size
-
-    # must set shuffle=False, persistent_workers=False (because worker is in another thread)
-    train_data_loader = DataLoader(train_data, shuffle=False, pin_memory=True, batch_size=config.train.micro_bsz, num_workers=1, persistent_workers=False, drop_last=True)
     validation_data_loader = None
-    if config.train.validation_data_file != "":
-        validation_data_loader = DataLoader(validation_data, shuffle=False, pin_memory=True, batch_size=config.train.micro_bsz, num_workers=1, persistent_workers=False, drop_last=True)
+
+
+    if config.train.data_type == 'jsonl':
+        import torch.utils.data
+        from transformers import AutoModelForCausalLM, AutoTokenizer
+        tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-8B")
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
+        from raw_dataset import load_datasets_from_directories,TypedDataset,TypedStreamingCLMDataCollator
+        all_ds,feature_types = load_datasets_from_directories(config.train.data_file.split(','),tokenizer)
+        typed_dataset = TypedDataset(all_ds, feature_types)
+        data_collator = TypedStreamingCLMDataCollator(tokenizer=tokenizer, 
+                                                    max_length=config.model.ctx_len, 
+                                                    min_length=config.model.ctx_len, 
+                                                    typed_dataset=typed_dataset,
+                                                    packing=True) # FIXME args.need_to_pad)
+        # from torch.utils.data.distributed import DistributedSampler
+        # train_sampler = DistributedSampler(
+        #     typed_dataset,
+        #     num_replicas=self.trainer.world_size,
+        #     rank=self.trainer.local_rank,
+        #     shuffle=True
+        # )
+        train_data_loader = torch.utils.data.DataLoader(
+            typed_dataset, 
+            batch_size=config.train.micro_bsz,
+            #sampler=train_sampler,
+            num_workers=1, 
+            pin_memory=True, 
+            persistent_workers=False, 
+            drop_last=True, 
+            collate_fn=data_collator,
+            shuffle=True,
+        ) 
+
+    else:
+        train_data = MyDataset(config, trainer)
+        if config.train.validation_data_file != "":
+            validation_data = MMapDataset(config.train.validation_data_file, config.model.ctx_len)
+        config.model.vocab_size = train_data.vocab_size
+
+        # must set shuffle=False, persistent_workers=False (because worker is in another thread)
+        train_data_loader = DataLoader(train_data, shuffle=False, pin_memory=True, batch_size=config.train.micro_bsz, num_workers=1, persistent_workers=False, drop_last=True)
+        if config.train.validation_data_file != "":
+            validation_data_loader = DataLoader(validation_data, shuffle=False, pin_memory=True, batch_size=config.train.micro_bsz, num_workers=1, persistent_workers=False, drop_last=True)
 
     ds_ckpt_path = None
     #if 'deepspeed_stage_3' in config.train.strategy and config.continued:
     #    ds_ckpt_path = config.train.load_model
     print("Trainer.fit")
     trainer.fit(wrapper, train_dataloaders=train_data_loader, val_dataloaders=validation_data_loader, ckpt_path=ds_ckpt_path)
+    #trainer.fit(wrapper, ckpt_path=ds_ckpt_path)
 

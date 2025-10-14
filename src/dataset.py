@@ -63,7 +63,7 @@ class MyDataset(Dataset):
         x = torch.tensor(dix[:-1], dtype=torch.long)
         y = torch.tensor(dix[1:], dtype=torch.long)
 
-        return x, y
+        return dict(input_ids=x, attention_mask=torch.ones_like(x), labels=y)
 
 class MMapDataset(Dataset):
     def __init__(self, data_prefix, ctx_len):

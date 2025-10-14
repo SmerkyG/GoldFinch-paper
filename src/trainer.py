@@ -1,6 +1,6 @@
 import os, math, time, datetime, subprocess
 import torch
-from torch.utils.data import DataLoader
+#from torch.utils.data import DataLoader
 import lightning.pytorch as pl
 from lightning_utilities.core.rank_zero import rank_zero_info, rank_zero_only
 
@@ -151,35 +151,39 @@ class train_callback(pl.Callback):
             #     if kt_s > 0:
             #         lll["kt/s"] = kt_s
             #     trainer.my_wandb.log(lll, step=int(real_global_step))
-        if config.train.magic_prime > 0:
-            expand_factor = 1
-            if int(real_global_step) == int(config.train.magic_prime * expand_factor // self.config.runtime.global_step_bsz) - 1:
-                pl_module.save_weights(f"{config.runtime.proj_path}/rwkv-final.pth")
+        # if config.train.magic_prime > 0:
+        #     expand_factor = 1
+        #     if int(real_global_step) == int(config.train.magic_prime * expand_factor // self.config.runtime.global_step_bsz) - 1:
+        #         pl_module.save_weights(f"{config.runtime.proj_path}/rwkv-final.pth")
+        real_tokens = int(pl_module.get_real_tokens())
+        if self.config.train.tokens_save > 0 and real_tokens // self.config.train.tokens_save < (real_tokens + self.config.model.ctx_len * self.config.runtime.global_step_bsz) // self.config.train.tokens_save:
+            current_ckpt_num = real_tokens // self.config.train.tokens_save
+            pl_module.save_weights(f"{config.runtime.proj_path}/rwkv-{current_ckpt_num}.pth")
                 
 
-    def on_train_epoch_start(self, trainer, pl_module):
-        config = self.config
-        if pl.__version__[0]=='2':
-            dataset = trainer.train_dataloader.dataset
-        else:
-            dataset = trainer.train_dataloader.dataset.datasets
-        assert "MyDataset" in str(dataset)
-        # print(f'########## world_size {trainer.world_size} global_rank {trainer.global_rank} real_epoch {trainer.real_epoch} ##########')
+    # def on_train_epoch_start(self, trainer, pl_module):
+    #     config = self.config
+    #     if pl.__version__[0]=='2':
+    #         dataset = trainer.train_dataloader.dataset
+    #     else:
+    #         dataset = trainer.train_dataloader.dataset.datasets
+    #     assert "MyDataset" in str(dataset)
+    #     # print(f'########## world_size {trainer.world_size} global_rank {trainer.global_rank} real_epoch {trainer.real_epoch} ##########')
 
-    def on_train_epoch_end(self, trainer, pl_module):
-        config = self.config
-        to_save_dict = {}
-        real_current_epoch = trainer.current_epoch
-        if (config.train.epoch_save > 0 and (real_current_epoch+1) % config.train.epoch_save == 0) or (real_current_epoch == config.runtime.epoch_count - 1):
-            try:
-                pl_module.save_weights(f"{config.runtime.proj_path}/rwkv-{trainer.current_epoch}.pth")
-            except Exception as e:
-                print('Error\n\n', e, '\n\n')
+    # def on_train_epoch_end(self, trainer, pl_module):
+    #     config = self.config
+    #     to_save_dict = {}
+    #     real_current_epoch = trainer.current_epoch
+    #     if (config.train.epoch_save > 0 and (real_current_epoch+1) % config.train.epoch_save == 0) or (real_current_epoch == config.runtime.epoch_count - 1):
+    #         try:
+    #             pl_module.save_weights(f"{config.runtime.proj_path}/rwkv-{trainer.current_epoch}.pth")
+    #         except Exception as e:
+    #             print('Error\n\n', e, '\n\n')
 
-        if trainer.is_global_zero:  # logging
-            trainer.my_log.write(f"{real_current_epoch} {trainer.my_epoch_loss:.6f} {math.exp(trainer.my_epoch_loss):.4f} {trainer.my_lr:.8f} {datetime.datetime.now()} {real_current_epoch - config.train.epoch_begin}\n")
-            trainer.my_log.flush()
+    #     if trainer.is_global_zero:  # logging
+    #         trainer.my_log.write(f"{real_current_epoch} {trainer.my_epoch_loss:.6f} {math.exp(trainer.my_epoch_loss):.4f} {trainer.my_lr:.8f} {datetime.datetime.now()} {real_current_epoch - config.train.epoch_begin}\n")
+    #         trainer.my_log.flush()
 
-            trainer.my_loss_sum = 0
-            trainer.my_loss_count = 0
+    #         trainer.my_loss_sum = 0
+    #         trainer.my_loss_count = 0
 

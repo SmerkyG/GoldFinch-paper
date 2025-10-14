@@ -550,6 +550,9 @@ def sliding_window_sink_causal_mask(b, h, q_idx, kv_idx):
     sink_mask = kv_idx < SINK_WINDOW
     return causal_mask & (window_mask | sink_mask)
 
+def sliding_window_sink_causal(score, b, h, q_idx, kv_idx):
+    return torch.where(sliding_window_sink_causal_mask(b, h, q_idx, kv_idx), score, -float('inf'))
+
 def saw_mask(b, h, q_idx, kv_idx):
     causal_mask = q_idx >= kv_idx
     window_mask = q_idx - kv_idx <= SLIDING_WINDOW
@@ -1377,7 +1380,7 @@ class TMix_qwen3newatt(TMix_qwen3):
 class TMix_qwen3swa(TMix_qwen3):
     def forward(self, x, reset_mask, v_first, last_model_state:ModelState, shared:Shared, output_attentions:bool=False):
         global SLIDING_WINDOW, SINK_WINDOW
-        SLIDING_WINDOW = 512
+        SLIDING_WINDOW = 1024
         SINK_WINDOW = 1
 
         if SLIDING_WINDOW >= x.size(-2):
@@ -1407,44 +1410,121 @@ class TMix_qwen3swa(TMix_qwen3):
         k = repeat_kv(k, self.num_key_value_groups)
         v = repeat_kv(v, self.num_key_value_groups)
 
-        assert not output_attentions
-        attn_weights = torch.empty(0, device=x.device)
 
-        global block_mask, causal_mask
+
+        attn_weights = None
+        S = k.size(-2)
+
+        global block_mask
         if block_mask is None:
-            block_mask = create_mask(mod_fn=sliding_window_sink_causal_mask, B=None, H=None, Q_LEN=L, KV_LEN=L, device=q.device)
-            causal_mask = create_mask(mod_fn=get_causal_mask, B=None, H=None, Q_LEN=L, KV_LEN=L, device=q.device)
-        #     temp_mask = torch.ones(L, L, dtype=torch.bool, device=q.device).tril(diagonal=0)
-        #     attn_bias = torch.zeros(L, L, dtype=q.dtype, device=q.device)
-        #     attn_bias.masked_fill_(temp_mask.logical_not(), float("-inf"))
-        #     block_mask = attn_bias.to(v.dtype)
-        # #     # block_mask = torch.ones(L, L, dtype=torch.bool, device=q.device).tril()        
-        use_sliding = F.dropout(torch.ones(B, 1, L, 1, device=x.device), p=0.25) > 0
-        chosen_mask = torch.where(use_sliding, block_mask, causal_mask)
-        y = nn.functional.scaled_dot_product_attention(q, k, v, dropout_p=0.0, attn_mask=chosen_mask)
-        #y = nn.functional.scaled_dot_product_attention(q, k, v, dropout_p=0.0, attn_mask=torch.ones(L, L, dtype=torch.bool, device=q.device).tril())
-
-        #y = nn.functional.scaled_dot_product_attention(q, k, v, dropout_p=0.0, is_causal=True)
-        # do sliding window by (inefficiently) subtracting off the part outside of the window, because we found implementation difference (off by 1/256th for bfloat16) in sdpa causal vs masked
-        #if SLIDING_WINDOW < L:
-        #    ym = nn.functional.scaled_dot_product_attention(q, k, v, dropout_p=0.0, attn_mask=torch.ones(L, L, dtype=torch.bool, device=q.device).tril(diagonal=-SLIDING_WINDOW))
-        #    y = y - ym
-        #if not (ym==y).all().item():
-        #    print("diff", (y-ym).abs().max())
-        #    assert False, 'bad attn diff'
-        # L, S = q.size(-2), k.size(-2)
-        # scale_factor = 1 / math.sqrt(q.size(-1))
-        # attn_weight = (q.float() * scale_factor) @ k.transpose(-2, -1).float()
-        # #attn_weight += block_mask
-        # attn_weight = torch.softmax(attn_weight, dim=-1).to(v.dtype)
-        # attn_weight = attn_weight.tril()
-        # y = attn_weight @ v
+            block_mask = create_block_mask(mask_mod=sliding_window_sink_causal_mask, B=None, H=None, Q_LEN=L, KV_LEN=S, device=q.device)
+        y = get_flex_attention()(query=q, key=k, value=v, block_mask=block_mask, score_mod=sliding_window_sink_causal)
 
         y = y.transpose(1,2)
         y = y.reshape(B,L,-1)
         y = self.o_proj(y)
         return y, v_first, TimeMixState(wkv_state, last_state.shift_state), attn_weights
 
+
+
+
+
+        # assert not output_attentions
+        # attn_weights = torch.empty(0, device=x.device)
+
+        # global block_mask, causal_mask
+        # if block_mask is None:
+        #     block_mask = create_mask(mod_fn=sliding_window_sink_causal_mask, B=None, H=None, Q_LEN=L, KV_LEN=L, device=q.device)
+        #     causal_mask = create_mask(mod_fn=get_causal_mask, B=None, H=None, Q_LEN=L, KV_LEN=L, device=q.device)
+        # #     temp_mask = torch.ones(L, L, dtype=torch.bool, device=q.device).tril(diagonal=0)
+        # #     attn_bias = torch.zeros(L, L, dtype=q.dtype, device=q.device)
+        # #     attn_bias.masked_fill_(temp_mask.logical_not(), float("-inf"))
+        # #     block_mask = attn_bias.to(v.dtype)
+        # # #     # block_mask = torch.ones(L, L, dtype=torch.bool, device=q.device).tril()        
+        # use_sliding = F.dropout(torch.ones(B, 1, L, 1, device=x.device), p=0.25) > 0
+        # chosen_mask = torch.where(use_sliding, block_mask, causal_mask)
+        # y = nn.functional.scaled_dot_product_attention(q, k, v, dropout_p=0.0, attn_mask=chosen_mask)
+        # #y = nn.functional.scaled_dot_product_attention(q, k, v, dropout_p=0.0, attn_mask=torch.ones(L, L, dtype=torch.bool, device=q.device).tril())
+
+        # #y = nn.functional.scaled_dot_product_attention(q, k, v, dropout_p=0.0, is_causal=True)
+        # # do sliding window by (inefficiently) subtracting off the part outside of the window, because we found implementation difference (off by 1/256th for bfloat16) in sdpa causal vs masked
+        # #if SLIDING_WINDOW < L:
+        # #    ym = nn.functional.scaled_dot_product_attention(q, k, v, dropout_p=0.0, attn_mask=torch.ones(L, L, dtype=torch.bool, device=q.device).tril(diagonal=-SLIDING_WINDOW))
+        # #    y = y - ym
+        # #if not (ym==y).all().item():
+        # #    print("diff", (y-ym).abs().max())
+        # #    assert False, 'bad attn diff'
+        # # L, S = q.size(-2), k.size(-2)
+        # # scale_factor = 1 / math.sqrt(q.size(-1))
+        # # attn_weight = (q.float() * scale_factor) @ k.transpose(-2, -1).float()
+        # # #attn_weight += block_mask
+        # # attn_weight = torch.softmax(attn_weight, dim=-1).to(v.dtype)
+        # # attn_weight = attn_weight.tril()
+        # # y = attn_weight @ v
+
+        # y = y.transpose(1,2)
+        # y = y.reshape(B,L,-1)
+        # y = self.o_proj(y)
+        # return y, v_first, TimeMixState(wkv_state, last_state.shift_state), attn_weights
+
+class TMix_qwen3tttdr(TMix_qwen3):
+    def forward(self, x, reset_mask, v_first, last_model_state:ModelState, shared:Shared, output_attentions:bool=False):
+        last_state = last_model_state.block_states[self.layer_id].time_mix_state
+        B, L, D = x.size()
+        QH = self.num_heads
+        KVH = self.num_key_value_heads
+
+        q = self.q_proj(x)
+        k = self.k_proj(x)
+        v = self.v_proj(x)
+
+        wkv_state = last_state.wkv_state
+
+        q = self.q_norm(q.view(B,L,QH,-1)).transpose(1,2)
+        k = self.k_norm(k.view(B,L,KVH,-1)).transpose(1,2)
+        v = v.view(B,L,KVH,-1).transpose(1,2)
+        
+        cos, sin = shared.angles.unbind(0)
+        q, k = apply_rotary_pos_emb(q, k, cos, sin)
+        q = q.to(v.dtype)
+        k = k.to(v.dtype)
+
+        assert not output_attentions
+        attn_weights = torch.empty(0, device=x.device)
+
+        # repeat k/v heads if n_kv_heads < n_heads
+        k = repeat_kv(k, self.num_key_value_groups)
+        v = repeat_kv(v, self.num_key_value_groups)
+
+        sink_size = 32
+        global SINK_WINDOW
+        SINK_WINDOW = 256
+        window_size = 128      
+        global SLIDING_WINDOW
+        SLIDING_WINDOW = 1024
+        global SAW_CTX_LEN
+        SAW_CTX_LEN = k.size(-2)
+
+        k = torch.cat([k, k.mean(dim=2, keepdim=True).expand(-1,-1,SAW_CTX_LEN,-1)], dim=2)
+        v = torch.cat([v, v.mean(dim=2, keepdim=True).expand(-1,-1,SAW_CTX_LEN,-1)], dim=2)
+        #k = torch.cat([k, torch.zeros_like(k)], dim=2)
+        #v = torch.cat([v, torch.zeros_like(v)], dim=2)
+
+        S = k.size(-2)
+
+        global block_mask
+        if block_mask is None:
+            block_mask = create_block_mask(mask_mod=lambda b,h,q_idx,kv_idx: saw_mask(b,h,q_idx,kv_idx), B=None, H=None, Q_LEN=L, KV_LEN=S, device=q.device)
+            #block_mask = create_block_mask(mask_mod=lambda b,h,q_idx,kv_idx: sliding_window_causal_mask(b,h,q_idx,kv_idx), B=None, H=None, Q_LEN=L, KV_LEN=S, device=q.device)
+        y = get_flex_attention()(query=q, key=k, value=v, block_mask=block_mask)# score_mod=sliding_window_causal, block_mask=block_mask)
+
+        #y = nn.functional.scaled_dot_product_attention(q, k, v, dropout_p=0.0, attn_mask=mask)
+
+        y = y.transpose(1,2)
+        y = y.reshape(B,L,-1)
+        y = self.o_proj(y)
+        return y, v_first, TimeMixState(wkv_state, last_state.shift_state), attn_weights
+    
 class TMix_qwen3sparsepower(TMix_qwen3):
     def forward(self, x, reset_mask, v_first, last_model_state:ModelState, shared:Shared, output_attentions:bool=False):
         last_state = last_model_state.block_states[self.layer_id].time_mix_state
@@ -2175,7 +2255,8 @@ class TMix_qwen3rwkv6(TMix_qwen3):
             # RWKV-6
             decay_speed = torch.ones(dim_att)
             for n in range(dim_att):
-                decay_speed[n] = -6 + 5 * (n / (dim_att - 1)) ** (0.7 + 1.3 * (1.0 - ratio_0_to_1))
+                decay_speed[n] = -6 + 5 * (n / (dim_att - 1)) ** (0.7 + 1.3 * ratio_0_to_1)
+                #decay_speed[n] = -6 + 5 * (n / (dim_att - 1)) ** (0.7 + 1.3 * (1.0 - ratio_0_to_1)) # this is probably better but who knows, it wasnt what we did in the paper
             module.time_decay.copy_(decay_speed.reshape(1,1,dim_att))
             module.time_decay_w1.zero_()
             module.time_decay_w2.uniform_(-0.01, 0.01)
@@ -2393,11 +2474,18 @@ class TMix_qwen3rwkv7(TMix_qwen3):
         self.a1 = nn.Parameter(torch.empty(C, lora_rank_iclr))
         self.a2 = nn.Parameter(torch.empty(lora_rank_iclr, self.num_heads * self.qk_head_dim))
 
-        #if layer_id > 0:
-        self.v0 = nn.Parameter(torch.empty(1,1,H*N))
-        self.v1 = nn.Parameter(torch.empty(C, lora_rank_value_residual_mix))
-        self.v2 = nn.Parameter(torch.empty(lora_rank_value_residual_mix, H*N))
+        self.use_k_first = config.use_k_first
+        v_first_headsize = self.num_key_value_heads if config.v_first_pre_gqa else H
+        if self.use_k_first:
+            self.k0 = nn.Parameter(torch.empty(1,1,v_first_headsize*N))
+            self.k1 = nn.Parameter(torch.empty(C, lora_rank_value_residual_mix))
+            self.k2 = nn.Parameter(torch.empty(lora_rank_value_residual_mix, v_first_headsize*N))
 
+        #if layer_id > 0:
+        self.v0 = nn.Parameter(torch.empty(1,1,v_first_headsize*N))
+        self.v1 = nn.Parameter(torch.empty(C, lora_rank_value_residual_mix))
+        self.v2 = nn.Parameter(torch.empty(lora_rank_value_residual_mix, v_first_headsize*N))
+            
         if config.gate_rank_type == 1:
             self.gate = nn.Linear(self.hidden_size, self.num_heads * self.head_dim, bias=False)
         elif config.gate_rank_type == 2:
@@ -2439,8 +2527,8 @@ class TMix_qwen3rwkv7(TMix_qwen3):
         # time_weight = time_weight[None, None, :]
 
         decay_speed = [
-            -7.0 + 5.0 * (n / (self.dim_posemb - 1)) ** (0.85 + 1.0 * ratio_0_to_1 ** 0.5)
-            for n in range(self.dim_posemb)
+            -7.0 + 5.0 * (n / (dim_att - 1)) ** (0.85 + 1.0 * ratio_0_to_1 ** 0.5)
+            for n in range(dim_att)
         ]
 
         # def inverse_sigmoid(x): return math.log(x) - math.log(1 - x)
@@ -2486,6 +2574,10 @@ class TMix_qwen3rwkv7(TMix_qwen3):
             ortho_init(module.a2, 0.1)
 
             if layer_id > 0:
+                if self.use_k_first:
+                    module.k0.copy_(1.0)
+                    module.k1.zero_()
+                    ortho_init(module.k2, 0.1)
                 module.v0.copy_(1.0)
                 module.v1.zero_()
                 ortho_init(module.v2, 0.1)
@@ -2569,9 +2661,6 @@ class TMix_qwen3rwkv7(TMix_qwen3):
 
         log_neglog_w = - 0.5 - torch.nn.functional.softplus(-(self.w0 + w).float())
         
-        if self.dim_posemb != self.head_dim:
-            log_neglog_w = F.pad(log_neglog_w.view(B, T, self.num_heads, self.dim_posemb // self.num_heads), [0, self.qk_head_dim - (self.dim_posemb // self.num_heads)], value=float('-inf')).view(B, T, -1)
-
         if self.config.use_pos_emb:
             r = r.view(B,T,-1,N)
             k = k.view(B,T,-1,N)
@@ -2582,6 +2671,20 @@ class TMix_qwen3rwkv7(TMix_qwen3):
             r = r.transpose(1,2).view(B,T,-1).to(v.dtype)
             k = k.transpose(1,2).view(B,T,-1).to(v.dtype)
 
+        if self.v0.shape[-2] == self.num_key_value_heads:
+            if self.layer_id == 0:
+                if self.use_k_first:
+                    v_first = torch.cat([k,v], dim=-1)
+                else:
+                    v_first = v
+            else:
+                if self.use_k_first:
+                    v_first_k, v_first_v = torch.chunk(v_first, 2, dim=-1)
+                    k = k + (v_first_k - k) * torch.sigmoid(self.k0 + (xv @ self.k1) @ self.k2)
+                    v = v + (v_first_v - v) * torch.sigmoid(self.v0 + (xv @ self.v1) @ self.v2)
+                else:
+                    v = v + (v_first - v) * torch.sigmoid(self.v0 + (xv @ self.v1) @ self.v2)
+
         # repeat k/v heads if n_kv_heads < n_heads
         k = k.view(B, T, -1, 1, self.head_dim).expand(-1, -1, -1, self.num_key_value_groups, -1).reshape(B, T, -1)
         v = v.view(B, T, -1, 1, self.head_dim).expand(-1, -1, -1, self.num_key_value_groups, -1).reshape(B, T, -1)
@@ -2591,14 +2694,24 @@ class TMix_qwen3rwkv7(TMix_qwen3):
         # kk = k
         #kk = torch.nn.functional.normalize((k * self.k_k).view(B,T,H,-1), dim=-1, p=2.0).view(B,T,-1)
         #kk = (k * self.k_k).view(B,T,H,-1).float()
-        kk = (k).view(B,T,H,-1).float()
-        kk = (kk / (torch.norm(kk, dim=-1, keepdim=True) + 1e-12)).view(B,T,-1).to(k.dtype)
+        #kk = (k).view(B,T,H,-1).float()
+        #kk = (kk / (torch.norm(kk, dim=-1, keepdim=True) + 1e-12)).view(B,T,-1).to(k.dtype)
+        kk = F.normalize(k.view(B,T,H,-1), dim=-1, p=2.0).view(B,T,-1)
         #k = k * (1 + (a-1) * self.k_a)
 
-        if self.layer_id == 0:
-            v_first = v
-        else:
-            v = v + (v_first - v) * torch.sigmoid(self.v0 + (xv @ self.v1) @ self.v2)
+        if self.v0.shape[-2] == self.num_heads:
+            if self.layer_id == 0:
+                if self.use_k_first:
+                    v_first = torch.cat([k,v], dim=-1)
+                else:
+                    v_first = v
+            else:
+                if self.use_k_first:
+                    v_first_k, v_first_v = torch.chunk(v_first, 2, dim=-1)
+                    k = k + (v_first_k - k) * torch.sigmoid(self.k0 + (xv @ self.k1) @ self.k2)
+                    v = v + (v_first_v - v) * torch.sigmoid(self.v0 + (xv @ self.v1) @ self.v2)
+                else:
+                    v = v + (v_first - v) * torch.sigmoid(self.v0 + (xv @ self.v1) @ self.v2)
 
         z = -kk
         b = kk*a
@@ -2622,6 +2735,10 @@ class TMix_qwen3rwkv7(TMix_qwen3):
         else:
             x = x * N ** -0.5
         x = x.view(B, T, -1).to(x.dtype)
+
+        if self.config.use_bonus:
+            x = x + ((r.view(B,T,H,-1)*k.view(B,T,H,-1)*self.r_k).sum(dim=-1, keepdim=True) * v.view(B,T,H,-1)).view(B,T,-1)
+
         if self.config.gate_rank_type != 0:
             x = x * g
         x = self.o_proj(x)
@@ -2660,7 +2777,7 @@ class CMix_qwen3(nn.Module):
         return self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x)), last_state
 
 def is_layer_attention(config, layer_id):
-    return layer_id >= config.n_layer - config.preserve_last_n_layers and layer_id < config.n_layer - config.replace_last_n_layers and (layer_id > min(config.n_layer - config.replace_last_n_layers, config.last_striping_layer) or (min(config.n_layer-1, config.last_striping_layer) - layer_id) % config.attention_striping == 0)
+    return layer_id >= config.n_layer - config.preserve_last_n_layers and layer_id < config.n_layer - config.replace_last_n_layers and (layer_id > config.last_striping_layer or (min(config.n_layer-1, config.n_layer - config.replace_last_n_layers, config.last_striping_layer) - layer_id) % config.attention_striping == 0)
 
 class Qwen3DecoderLayer(nn.Module):
     def __init__(self, config:TrainerCLI_Config, layer_id:int):
@@ -2677,9 +2794,9 @@ class Qwen3DecoderLayer(nn.Module):
         cmix = CMix_qwen3(args, layer_id)
 
         if layer_id > config.model.last_striping_layer:
-            attn_class = TMix_qwen3
+            attn_class = TMix_qwen3_nope
         elif is_layer_attention(args, layer_id):
-            attn_class = TMix_qwen3 #TMix_qwen3_nope #TMix_qwen3_moba #TMix_qwen3wack #TMix_qwen3_sympow #TMix_qwen3_fox #TMix_qwen3chunk #TMix_qwen3sparsepower #TMix_qwen3_moba #TMix_qwen3_based # TMix_qwen3_gatedconv #TMix_qwen3_based #TMix_qwen3_nopecanon #TMix_qwen3newatt # TMix_qwen3doubleatt
+            attn_class = TMix_qwen3_nope #TMix_qwen3_moba #TMix_qwen3wack #TMix_qwen3_sympow #TMix_qwen3_fox #TMix_qwen3chunk #TMix_qwen3sparsepower #TMix_qwen3_moba #TMix_qwen3_based # TMix_qwen3_gatedconv #TMix_qwen3_based #TMix_qwen3_nopecanon #TMix_qwen3newatt # TMix_qwen3doubleatt
         elif 'rwkv6' in args.attention_type or 'gla' in args.attention_type:
             attn_class = TMix_qwen3rwkv6
         elif 'rwkv7' in args.attention_type:
@@ -2697,6 +2814,7 @@ class Qwen3DecoderLayer(nn.Module):
         else:
             assert 'bad attention type'
             attn_class = TMix_qwen3
+        print("layer and class:", layer_id, attn_class)
         self.self_attn = attn_class(args, layer_id)
         self.default_time_mix_state_factory = self.self_attn.get_default_state_factory() if hasattr(self.self_attn, 'get_default_state_factory') else lambda x, c, r: TimeMixState()
 
@@ -2930,13 +3048,19 @@ class Model_qwen3(nn.Module): # Qwen3CausalLM
             #         # decoder_layer.self_attn.k_proj.requires_grad_(False)
             #         # decoder_layer.self_attn.v_proj.requires_grad_(False)
 
-            # FIXME - remove these for full training
             # for decoder_layer in self.model.layers:
-            #     decoder_layer.post_attention_layernorm.requires_grad_(False)
-            #     decoder_layer.mlp.requires_grad_(False)
-            # self.model.embed_tokens.requires_grad_(False)
-            # self.model.norm.requires_grad_(False)
-            # self.lm_head.requires_grad_(False)
+            #     # freeze attention layers
+            #     if is_layer_attention(self.config.model, decoder_layer.layer_id):
+            #         decoder_layer.self_attn.requires_grad_(False)
+            #         decoder_layer.input_layernorm.requires_grad_(False)
+
+            # FIXME - remove these for full training
+            for decoder_layer in self.model.layers:
+                decoder_layer.post_attention_layernorm.requires_grad_(False)
+                decoder_layer.mlp.requires_grad_(False)
+            # self.model.embed_tokens.requires_grad_(False) # NOTE - mose says deepspeed bug causes problems when this is false, so he used lr=0
+            self.model.norm.requires_grad_(False)
+            self.lm_head.requires_grad_(False)
 
     def forward(self, token_ids:Tensor|list, last_model_state:ModelState|None = None, output_hidden_states:bool=False, output_attentions:bool=False, output_post_attention_hidden_states:bool=False):
         #print("teacher q min, max", float(self.model.layers[0].self_attn.q_proj.weight.min()), float(self.model.layers[0].self_attn.q_proj.weight.max()))
@@ -2957,16 +3081,21 @@ class Model_qwen3(nn.Module): # Qwen3CausalLM
             decoder_layer.mlp = TJIT(decoder_layer.mlp)
 
         lr_decay = set()
+        lr_0x = set()
         lr_1x = set()
         lr_fp32 = set()
         lr_2 = set()
         for n, p in self.named_parameters():
             if not p.requires_grad:
                 continue
+            if 'embed_tokens' in n:
+                # FIXME - zero LR on embeddings because of deepspeed bug in requires_grad=False for those
+                lr_0x.add(n)
+                continue
             # if 'lm_head' in n or 'embed_tokens' in n:
             #     lr_fp32.add(n)
             #     continue
-            if '.self_attn.' in n and not is_layer_attention(self.config.model, int(n.split('.')[2])):
+            if '.self_attn.' in n: # and not is_layer_attention(self.config.model, int(n.split('.')[2])):
                 lr_2.add(n)
                 continue
             # NOTE - this check is no good in FSDP because the tensors end up with some stupid fake shape
@@ -2982,10 +3111,12 @@ class Model_qwen3(nn.Module): # Qwen3CausalLM
         #    assert sorted(param_dict) == sorted(param_check)
 
         lr_decay = sorted(list(lr_decay))
+        lr_0x = sorted(list(lr_0x))
         lr_1x = sorted(list(lr_1x))
         lr_fp32 = sorted(list(lr_fp32))
         lr_2 = sorted(list(lr_2))
         
+        print('0x', len(lr_0x), '\n')
         print('1x', len(lr_1x), '\n')
         print('decay', len(lr_decay), '\n')
         print('fp32', len(lr_fp32), '\n')
@@ -2994,6 +3125,8 @@ class Model_qwen3(nn.Module): # Qwen3CausalLM
         optim_groups = [
             {"params": [param_dict[n] for n in lr_1x], "weight_decay": 0.0, "my_lr_scale": 1.0, 'name':'lr_1x'},
         ]
+        if len(lr_0x) > 0:
+            optim_groups += [{"params": [param_dict[n] for n in lr_0x], "weight_decay": train_config.weight_decay, "my_lr_scale": 0.0, 'name':'lr_0x'}]
         if len(lr_fp32) > 0:
             # FIXME - NOTE THIS VERY LOW LR SCALE!!!
             optim_groups += [{"params": [param_dict[n] for n in lr_fp32], "weight_decay": train_config.weight_decay, "my_lr_scale": 0.5, 'name':'lr_fp32'}]

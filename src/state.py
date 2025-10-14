@@ -25,3 +25,4 @@ class Shared:
     def __init__(self):
         self.angles = torch.tensor([])
         self.bias_mask = torch.tensor([])
+        self.t = 0.0

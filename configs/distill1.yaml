@@ -6,8 +6,10 @@ train:
   train_stage: 3
   load_partial: 1
 
-  data_type: "binidx" 
-  data_file: "data/dclm-10B" #data/minipile_qwen2" 
+  # data_type: "binidx" 
+  # data_file: "data/dclm" #"data/dclm-10B" #data/minipile_qwen2" 
+  data_type: "jsonl"
+  data_file: "data/mose/instruct,data/mose/raw"
   my_exit_tokens: 100000000 # 1491785955
   # dclm-10B
   # --my_exit_tokens 1500087317 --magic_prime 5859677 --ctx_len 256

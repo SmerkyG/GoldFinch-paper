@@ -25,7 +25,10 @@ class Accuracy(AvgMetric):
 
     def update(self, margs:MetricArgs):
         with torch.no_grad():
-            value = margs.predictions.eq(margs.labels).sum().float() / (margs.labels.size(0)*margs.labels.size(1))
+            if margs.attention_mask is None:
+                value = margs.predictions.eq(margs.labels).sum().float() / (margs.labels.size(0)*margs.labels.size(1))
+            else:
+                value = margs.predictions.eq(margs.labels).sum().float() / (margs.attention_mask.sum())
             if self.running_total is None:
                 self.running_total = value
             else:

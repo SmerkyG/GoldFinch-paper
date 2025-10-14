@@ -74,6 +74,11 @@ class Transformer_Config(Model_Config):
     groupnorm_att:int = 1
 
     use_tokenshift:int = 1
+    
+    use_k_first:int = 0
+    v_first_pre_gqa:int = 0
+
+    use_bonus:int = 0
 
     phi:str = ''
 
@@ -120,6 +125,7 @@ class Train_Config:
 
     epoch_begin:int = 0
     epoch_save:int = 5
+    tokens_save:int = 0
     micro_bsz:int = 12
 
     lr_decay_type:str = 'cos'

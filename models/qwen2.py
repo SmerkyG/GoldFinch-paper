@@ -894,9 +894,8 @@ class TMix_qwen2rwkv6(TMix_qwen2):
             key_states = key_states.transpose(1, 2)
 
         # repeat k/v heads if n_kv_heads < n_heads
-        key_states = repeat_kv(key_states, self.num_key_value_groups)
-        value_states = repeat_kv(value_states, self.num_key_value_groups)
-        #dropout_rate = 0.0 if not self.training else self.attention_dropout
+        key_states = key_states.view(bsz, q_len, -1, 1, self.head_dim).expand(-1, -1, -1, self.num_key_value_groups, -1).reshape(bsz, q_len, -1, self.head_dim)
+        value_states = value_states.view(bsz, q_len, -1, 1, self.head_dim).expand(-1, -1, -1, self.num_key_value_groups, -1).reshape(bsz, q_len, -1, self.head_dim)
 
         decay_states_log = -decay_states.float().exp()
         decay_states_log = decay_states_log.clamp(-5) # FIXME - is this necessary?
@@ -947,7 +946,6 @@ class TMix_qwen2rwkv6(TMix_qwen2):
                 attn_output = fused_recurrent_gla(query_states, key_states, value_states, decay_states_log)[0]
                 attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
             elif ATTENTION_TYPE == 'rwkv6_wind_backstepping_longhead':
-                query_states,log_neglog_w,key_states,value_states = [i.to(torch.bfloat16) for i in [query_states,log_neglog_w,key_states,value_states]]
                 attn_output = RUN_CUDA_RWKV7g(query_states, log_neglog_w, key_states, value_states)
                 attn_output = attn_output * key_states.shape[-1] ** -0.5
             else:

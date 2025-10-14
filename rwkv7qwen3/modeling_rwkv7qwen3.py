@@ -176,7 +176,7 @@ except ImportError:
     print("pip install triton>=2.2.0")
 
 def is_layer_attention(config, layer_id):
-    return layer_id >= config.first_attention_layer and layer_id < config.first_post_attention_layer and  (layer_id > min(config.num_hidden_layers, config.last_striping_layer) or (min(config.num_hidden_layers-1, config.last_striping_layer) - layer_id) % config.attention_striping == 0)
+    return layer_id >= config.first_attention_layer and layer_id < config.first_post_attention_layer and  (layer_id > min(config.num_hidden_layers, config.last_striping_layer) or (min(config.num_hidden_layers-1, config.first_post_attention_layer, config.last_striping_layer) - layer_id) % config.attention_striping == 0)
 
 class Qwen3RotaryEmbedding(nn.Module):
     def __init__(self, config: RWKV7Qwen3Config, device=None):
@@ -244,16 +244,6 @@ def rms_norm(hidden_states, eps = 1e-6):
     variance = hidden_states.pow(2).mean(-1, keepdim=True)
     hidden_states = hidden_states * torch.rsqrt(variance + eps)
     return hidden_states.to(input_dtype)
-
-def generate_rotary_embedding(max_seqlen:int, dim:int, theta:float = 10000.0, scale:float = 1):
-    #inv_freq = 1.0 / (theta ** (torch.arange(0, dim, 2, dtype=torch.float).to(device) / dim))
-
-    angular_velocity = theta ** -(torch.arange(0, dim, 2, dtype=torch.float) / dim) / scale # frequencies from 1.0 ... 1/theta
-    angles = torch.outer(torch.arange(max_seqlen), angular_velocity)
-    # Different from paper, but it uses a different permutation in order to obtain the same calculation
-    emb = torch.cat((angles, angles), dim=-1)
-    return torch.stack([emb.cos(), emb.sin()], dim=0)
-    #return torch.polar(torch.ones_like(angles), angles)
 
 # Copied from transformers.models.llama.modeling_llama.rotate_half
 def rotate_half(x):
@@ -373,20 +363,33 @@ def get_causal_mask(L, S, device):
     mask = causal
     return mask[-L:]
 
-def get_swa_sink_mask(L, S, device):
-    ones = torch.ones([S,S], dtype=torch.bool, device=device)
-    swa = ~ones.tril(diagonal=-SLIDING_WINDOW)
-    sink = ones.clone()
-    sink[:, SINK_WINDOW:] = False
-    causal = ones.tril()
-    mask = causal & (swa | sink)
-    return mask[-L:]
+def get_swa_sink_mask(B, L, S, attention_mask, sliding_window, device):
+    q_idx = torch.arange(S-L, S, device=device)[None, None, :, None]
+    kv_idx = torch.arange(S, device=device)[None, None, None, :]
+    window_mask = kv_idx >= q_idx - sliding_window
+    if attention_mask is not None:
+        assert attention_mask.dtype == torch.bool
+        sink_indices = (S - attention_mask.view(B,L,S)[:,-1,:].sum(dim=-1)).view(B) # sink offset per batch idx
+        sink_mask = kv_idx == sink_indices.view(B,1,1,1)
+    else:
+        sink_mask = kv_idx == 0
+        attention_mask = kv_idx <= q_idx # causal
+    return attention_mask & (sink_mask | window_mask)
 
-def swa_sink_mask(b, h, q_idx, kv_idx):
-    causal_mask = q_idx >= kv_idx
-    window_mask = q_idx - kv_idx <= SLIDING_WINDOW
-    sink_mask = kv_idx < SINK_WINDOW
-    return causal_mask & (window_mask | sink_mask)
+# def get_swa_sink_mask(L, S, device):
+#     ones = torch.ones([S,S], dtype=torch.bool, device=device)
+#     swa = ~ones.tril(diagonal=-SLIDING_WINDOW)
+#     sink = ones.clone()
+#     sink[:, SINK_WINDOW:] = False
+#     causal = ones.tril()
+#     mask = causal & (swa | sink)
+#     return mask[-L:]
+
+# def swa_sink_mask(b, h, q_idx, kv_idx):
+#     causal_mask = q_idx >= kv_idx
+#     window_mask = q_idx - kv_idx <= SLIDING_WINDOW
+#     sink_mask = kv_idx < SINK_WINDOW
+#     return causal_mask & (window_mask | sink_mask)
 
 def sliding_window_causal(score, b, h, q_idx, kv_idx):
     return torch.where((q_idx >= kv_idx) & (q_idx - kv_idx <= SLIDING_WINDOW), score, -float("inf"))
@@ -1078,7 +1081,7 @@ class Qwen3SWA(Qwen3Attention):
         SLIDING_WINDOW = 1024
         SINK_WINDOW = 1
 
-        y = nn.functional.scaled_dot_product_attention(q, k, v, dropout_p=0.0, attn_mask=attention_mask & get_swa_sink_mask(L, S, q.device))
+        y = nn.functional.scaled_dot_product_attention(q, k, v, dropout_p=0.0, attn_mask=get_swa_sink_mask(B, L, S, attention_mask, SLIDING_WINDOW, q.device))
         y = y.transpose(1,2)
         y = y.reshape(*input_shape, -1)#.contiguous()
         y = self.o_proj(y)
@@ -1129,7 +1132,9 @@ class Qwen3SWASink(Qwen3Attention):
         # block_mask = create_block_mask(mask_mod=lambda b,h,q_idx,kv_idx: swa_sink_mask(b,h,q_idx,kv_idx), B=None, H=None, Q_LEN=L, KV_LEN=S, device=q.device)
         # y = get_flex_attention()(query=q, key=k, value=v, block_mask=block_mask)
 
-        y = nn.functional.scaled_dot_product_attention(q, k, v, dropout_p=0.0, attn_mask=attention_mask & get_swa_sink_mask(L, S, q.device))
+        sliding_window = 1024
+
+        y = nn.functional.scaled_dot_product_attention(q, k, v, dropout_p=0.0, attn_mask=get_swa_sink_mask(B, L, S, attention_mask, sliding_window, q.device)) # attention_mask & get_swa_sink_mask(L, S, q.device))
         y = y.transpose(1,2)
         y = y.reshape(*input_shape, -1)#.contiguous()
         y = self.o_proj(y)
@@ -2016,10 +2021,17 @@ class RWKV7Attention(nn.Module):
         self.a1 = nn.Parameter(torch.empty(C, lora_rank_iclr))
         self.a2 = nn.Parameter(torch.empty(lora_rank_iclr, H*N))
 
-        #if layer_idx > 0:
-        self.v0 = nn.Parameter(torch.empty(1,1,H*N))
+        self.use_k_first = config.use_k_first
+        v_first_headsize = self.num_key_value_heads if config.v_first_pre_gqa else H
+        if self.use_k_first:
+            self.k0 = nn.Parameter(torch.empty(1,1,v_first_headsize*N))
+            self.k1 = nn.Parameter(torch.empty(C, lora_rank_value_residual_mix))
+            self.k2 = nn.Parameter(torch.empty(lora_rank_value_residual_mix, v_first_headsize*N))
+
+        #if layer_id > 0:
+        self.v0 = nn.Parameter(torch.empty(1,1,v_first_headsize*N))
         self.v1 = nn.Parameter(torch.empty(C, lora_rank_value_residual_mix))
-        self.v2 = nn.Parameter(torch.empty(lora_rank_value_residual_mix, H*N))
+        self.v2 = nn.Parameter(torch.empty(lora_rank_value_residual_mix, v_first_headsize*N))
 
         if config.gate_rank_type == 1:
             self.gate = nn.Linear(C, H*N, bias=False)
@@ -2086,6 +2098,20 @@ class RWKV7Attention(nn.Module):
             cos, sin = position_embeddings
             r, k = apply_rotary_pos_emb(r, k, cos, sin, unsqueeze_dim=2)
 
+        if self.v0.shape[-2] == self.num_key_value_heads:
+            if v_first is None:
+                if self.use_k_first:
+                    v_first = torch.cat([k,v], dim=-1)
+                else:
+                    v_first = v
+            else:
+                if self.use_k_first:
+                    v_first_k, v_first_v = torch.chunk(v_first, 2, dim=-1)
+                    k = k + (v_first_k - k) * torch.sigmoid(self.k0 + (xv @ self.k1) @ self.k2)
+                    v = v + (v_first_v - v) * torch.sigmoid(self.v0 + (xv @ self.v1) @ self.v2)
+                else:
+                    v = v + (v_first - v) * torch.sigmoid(self.v0 + (xv @ self.v1) @ self.v2)
+
         # repeat k/v heads if n_kv_heads < n_heads
         k = k.view(B, T, -1, 1, self.head_dim).expand(-1, -1, -1, self.num_key_value_groups, -1).reshape(B, T, -1)
         v = v.view(B, T, -1, 1, self.head_dim).expand(-1, -1, -1, self.num_key_value_groups, -1).reshape(B, T, -1)
@@ -2094,16 +2120,27 @@ class RWKV7Attention(nn.Module):
         kk = (k).view(B,T,H,-1).float()
         kk = (kk / (torch.norm(kk, dim=-1, keepdim=True) + 1e-12)).view(B,T,-1).to(k.dtype)
 
-        if self.layer_idx == 0: v_first = v
-        else: v = v + (v_first - v) * torch.sigmoid(self.v0 + (xv @ self.v1) @ self.v2)        
+        if self.v0.shape[-2] == self.num_heads:
+            if v_first is None:
+                if self.use_k_first:
+                    v_first = torch.cat([k,v], dim=-1)
+                else:
+                    v_first = v
+            else:
+                if self.use_k_first:
+                    v_first_k, v_first_v = torch.chunk(v_first, 2, dim=-1)
+                    k = k + (v_first_k - k) * torch.sigmoid(self.k0 + (xv @ self.k1) @ self.k2)
+                    v = v + (v_first_v - v) * torch.sigmoid(self.v0 + (xv @ self.v1) @ self.v2)
+                else:
+                    v = v + (v_first - v) * torch.sigmoid(self.v0 + (xv @ self.v1) @ self.v2)
 
         # dealing with left-padding
-        # if attention_mask is not None:
-        #     if len(attention_mask.shape) == 2:
-        #         v = v * attention_mask[:, -v.shape[-2]:, None]
-        #     elif len(attention_mask.shape) == 4:
-        #         v = v * attention_mask[:, -1, -1, -v.shape[-2]:].view(B, T, 1)
-        #         #v = v * attention_mask[:, :, -1, -v.shape[-2]:, None]
+        if attention_mask is not None:
+            if len(attention_mask.shape) == 2:
+                v = v * attention_mask[:, -v.shape[-2]:, None]
+            elif len(attention_mask.shape) == 4:
+                v = v * attention_mask[:, -1, -1, -v.shape[-2]:].view(B, T, 1)
+                #v = v * attention_mask[:, :, -1, -v.shape[-2]:, None]
 
         log_w = -math.exp(-0.5) * torch.sigmoid(w_lora_result.float())       
         w = log_w.exp()
@@ -2131,6 +2168,10 @@ class RWKV7Attention(nn.Module):
             x = torch.nn.functional.group_norm(x.view(B*T,H*N).float(), num_groups=H, weight=self.ln_x.weight.float(), bias=self.ln_x.bias.float(), eps = self.ln_x.eps).view(B,T,H*N).to(v.dtype)
         else:
             x = (x.view(B,T,H*N) * N ** -0.5).to(v.dtype)
+
+        if self.config.use_bonus:
+            x = x + ((r.to(v.dtype).view(B,T,H,-1)*k.to(v.dtype).view(B,T,H,-1)*self.r_k).sum(dim=-1, keepdim=True) * v.view(B,T,H,-1)).view(B,T,-1)
+
         if self.config.gate_rank_type != 0:
             x = x * g
         x = self.o_proj(x)
@@ -2371,7 +2412,8 @@ class RWKV7Qwen3Model(RWKV7Qwen3PreTrainedModel):
             )
 
             hidden_states = layer_outputs[0]
-            v_first = layer_outputs[1]
+            if v_first is None:
+                v_first = layer_outputs[1]
 
             if output_attentions:
                 all_self_attns += (layer_outputs[2],)
