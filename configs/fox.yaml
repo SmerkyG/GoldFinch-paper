@@ -1,0 +1,8 @@
+model:
+  tmix: fox
+  attention_type: fox
+  reinit_att: 0
+  gate_rank_type: 2
+  use_pos_emb: 0
+  balance_state: 0
+  groupnorm_att: 1

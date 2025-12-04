@@ -56,8 +56,9 @@ class RWKV7State():
     def __init__(self) -> None:
         #super().__init__()
         self._seen_tokens = 0  # Used in `generate` to keep tally of how many tokens the cache has seen
-        self.layer_kv_states: List[torch.Tensor] = []
-        self.layer_shift_states:  List[torch.Tensor] = []
+        self.layer_key_states: List[torch.Tensor] = []
+        self.layer_value_states:  List[torch.Tensor] = []
+        self.layer_shift_states:  List[List[torch.Tensor]] = []
         self.cumulative_scores: List[torch.Tensor] = []
         self.sin: List[torch.Tensor] = []
         self.cos: List[torch.Tensor] = []
@@ -68,7 +69,7 @@ class RWKV7State():
         sequence length.
         """
         if layer_idx < len(self):
-            return (self.layer_kv_states[layer_idx], self.layer_shift_states[layer_idx])
+            return (self.layer_key_states[layer_idx], self.layer_value_states[layer_idx])
         else:
             raise KeyError(f"Cache only has {len(self)} layers, attempted to access layer with index {layer_idx}")
 
@@ -78,14 +79,14 @@ class RWKV7State():
         keys and values
         """
         for layer_idx in range(len(self)):
-            yield (self.layer_kv_states[layer_idx], self.layer_shift_states[layer_idx])
+            yield (self.layer_key_states[layer_idx], self.layer_value_states[layer_idx])
 
     def __len__(self):
         """
         Support for backwards-compatible `past_key_value` length, e.g. `len(past_key_value)`. This value corresponds
         to the number of layers in the model.
         """
-        return len(self.layer_kv_states)
+        return len(self.layer_key_states)
 
     def get_usable_length(self, new_seq_length: int, layer_idx: Optional[int] = 0) -> int:
         """Given the sequence length of the new inputs, returns the usable length of the cache."""
@@ -130,8 +131,8 @@ class RWKV7State():
     @torch.no_grad
     def update(
         self,
-        kv_state: torch.Tensor,
-        shift_state: torch.Tensor,
+        key_state: torch.Tensor,
+        value_state: torch.Tensor,
         layer_idx: int,
         token_count: int = 0,
         is_attention_layer: bool = True,
@@ -140,31 +141,31 @@ class RWKV7State():
         # Update the number of seen tokens
         if layer_idx == 0:
             if is_attention_layer:
-                token_count = kv_state.size(-2)
+                token_count = key_state.size(-2)
             self._seen_tokens += token_count
 
         # Update the cache
-        if kv_state is not None:
+        if key_state is not None:
             # There may be skipped layers, fill them with empty lists
-            if layer_idx >= len(self.layer_kv_states):
-                for _ in range(len(self.layer_kv_states), layer_idx):
+            if layer_idx >= len(self.layer_key_states):
+                for _ in range(len(self.layer_key_states), layer_idx):
                     if is_attention_layer:
-                        self.layer_kv_states.append(torch.tensor([], dtype=kv_state.dtype, device=kv_state.device)) # acts as key_cache
-                        self.layer_shift_states.append(torch.tensor([], dtype=shift_state.dtype, device=shift_state.device)) # acts as value_cache
+                        self.layer_key_states.append(torch.tensor([], dtype=key_state.dtype, device=key_state.device)) # acts as key_cache
+                        self.layer_value_states.append(torch.tensor([], dtype=value_state.dtype, device=value_state.device)) # acts as value_cache
                     else:
-                        self.layer_kv_states.append(torch.zeros_like(kv_state).requires_grad_(False))
-                        self.layer_shift_states.append(torch.zeros_like(shift_state).requires_grad_(False))
-                self.layer_kv_states.append(kv_state) # acts as key_cache
-                self.layer_shift_states.append(shift_state) # acts as value_cache
+                        self.layer_key_states.append(torch.zeros_like(key_state).requires_grad_(False))
+                        self.layer_value_states.append(torch.zeros_like(value_state).requires_grad_(False))
+                self.layer_key_states.append(key_state) # acts as key_cache
+                self.layer_value_states.append(value_state) # acts as value_cache
             else:
                 if is_attention_layer:
-                    self.layer_kv_states[layer_idx] = torch.cat([self.layer_kv_states[layer_idx], kv_state], dim=-2) # acts as key_cache
-                    self.layer_shift_states[layer_idx] = torch.cat([self.layer_shift_states[layer_idx], shift_state], dim=-2) # acts as value_cache
+                    self.layer_key_states[layer_idx] = torch.cat([self.layer_key_states[layer_idx], key_state], dim=-2) # acts as key_cache
+                    self.layer_value_states[layer_idx] = torch.cat([self.layer_value_states[layer_idx], value_state], dim=-2) # acts as value_cache
                 else:
-                    self.layer_kv_states[layer_idx].copy_(kv_state)
-                    self.layer_shift_states[layer_idx].copy_(shift_state)
+                    self.layer_key_states[layer_idx].copy_(key_state)
+                    self.layer_value_states[layer_idx].copy_(value_state)
 
-        return self.layer_kv_states[layer_idx], self.layer_shift_states[layer_idx]
+        return self.layer_key_states[layer_idx], self.layer_value_states[layer_idx]
 
 try:
     from fla.ops.rwkv7.chunk import chunk_rwkv7
@@ -176,7 +177,7 @@ except ImportError:
     print("pip install triton>=2.2.0")
 
 def is_layer_attention(config, layer_id):
-    return layer_id >= config.first_attention_layer and layer_id < config.first_post_attention_layer and  (layer_id > min(config.num_hidden_layers, config.last_striping_layer) or (min(config.num_hidden_layers-1, config.first_post_attention_layer, config.last_striping_layer) - layer_id) % config.attention_striping == 0)
+    return layer_id in config.attention_layers or (layer_id >= config.first_attention_layer and layer_id < config.first_post_attention_layer and  (layer_id > min(config.num_hidden_layers, config.last_striping_layer) or (min(config.num_hidden_layers-1, config.first_post_attention_layer, config.last_striping_layer) - layer_id) % config.attention_striping == 0))
 
 class Qwen3RotaryEmbedding(nn.Module):
     def __init__(self, config: RWKV7Qwen3Config, device=None):
@@ -630,8 +631,8 @@ class Qwen3AttentionVerticalSparse(Qwen3Attention):
             while len(past_key_values.cumulative_scores) <= self.layer_idx:
                 past_key_values.cumulative_scores.append(torch.zeros(B, QH, n_first_tokens, device=q.device, dtype=q.dtype))
             cumulative_scores = past_key_values.cumulative_scores[self.layer_idx]
-            key_cache = past_key_values.layer_kv_states[self.layer_idx]
-            value_cache = past_key_values.layer_shift_states[self.layer_idx]
+            key_cache = past_key_values.layer_key_states[self.layer_idx]
+            value_cache = past_key_values.layer_value_states[self.layer_idx]
 
         scores_to_accumulate = s
         if S == L:
@@ -725,6 +726,56 @@ class Qwen3AttentionNoPE(Qwen3Attention):
         v = repeat_kv(v, self.num_key_value_groups)
 
         S = k.size(-2)
+
+        y = nn.functional.scaled_dot_product_attention(q, k, v, dropout_p=0.0, attn_mask=attention_mask, is_causal=attention_mask is None and L==S)
+        y = y.transpose(1,2)
+        y = y.reshape(*input_shape, -1)#.contiguous()
+        y = self.o_proj(y)
+
+        attn_weights = None
+
+        return y, v_first
+
+class Qwen3AttentionNoPESSMax(Qwen3Attention):
+    def __init__(self, config, layer_id):
+        super().__init__(config, layer_id)
+
+        self.ssmax_scale = nn.Parameter(torch.empty(1))
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        frozen_residual: torch.Tensor,
+        v_first: Optional[torch.Tensor] = None, 
+        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        past_key_values: Optional[Cache] = None,
+        cache_position: Optional[torch.LongTensor] = None,
+        **kwargs: Unpack[FlashAttentionKwargs],
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
+        x = hidden_states
+
+        B, L, D = x.size()
+
+        input_shape = x.shape[:-1]
+        hidden_shape = (*input_shape, -1, self.head_dim)
+
+        q = self.q_norm(self.q_proj(x).view(hidden_shape)).transpose(1, 2)
+        k = self.k_norm(self.k_proj(x).view(hidden_shape)).transpose(1, 2)
+        v = self.v_proj(x).view(hidden_shape).transpose(1, 2)
+
+        if past_key_values is not None:
+            # sin and cos are specific to RoPE models; cache_position needed for the static cache
+            cache_kwargs = {"cache_position": cache_position}
+            k, v = past_key_values.update(k, v, self.layer_idx, cache_kwargs)
+
+        # repeat k/v heads if n_kv_heads < n_heads
+        k = repeat_kv(k, self.num_key_value_groups)
+        v = repeat_kv(v, self.num_key_value_groups)
+
+        S = k.size(-2)
+
+        q = (q * (self.ssmax_scale * torch.arange(1+S-L,1+S, device=x.device).log()).view(1,1,L,1)).to(x.dtype)
 
         y = nn.functional.scaled_dot_product_attention(q, k, v, dropout_p=0.0, attn_mask=attention_mask, is_causal=attention_mask is None and L==S)
         y = y.transpose(1,2)
@@ -1381,7 +1432,153 @@ class Qwen3Power(Qwen3Attention):
         attn_weights = None
 
         return y, v_first
-    
+
+class Qwen3FoXAttention(Qwen3Attention):
+    def __init__(self, config: RWKV7Qwen3Config, layer_idx: int):
+        super().__init__(config, layer_idx)
+
+        C = config.hidden_size
+        N = config.head_dim
+        H = config.num_attention_heads        
+        dim_att = H*N
+
+        self.x_r = nn.Parameter(torch.empty(1, 1, C))
+        self.x_k = nn.Parameter(torch.empty(1, 1, C))
+        self.x_v = nn.Parameter(torch.empty(1, 1, C))
+
+        self.decay_base = nn.Parameter(torch.full([H], 5.5))
+        self.decay_w = nn.Linear(C, H)
+
+        # Note: for some data, you can reduce D_GATE_LORA or even remove this gate
+        D_MISS = max(32, int(round(  (10*(C**0.5))  /32)*32)) # suggestion
+        self.miss = nn.Parameter(torch.empty(D_MISS, dim_att * 2))
+
+        #if layer_id > 0:
+        self.v0 = nn.Parameter(torch.empty(1,1,H*N))
+
+        #self.time_shift = nn.ZeroPad2d((0, 0, 1, -1))
+        if config.groupnorm_att:
+            self.ln_x = nn.GroupNorm(H, H*N, eps=self.head_dim * 1e-5)
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        frozen_residual: torch.Tensor,
+        v_first: Optional[torch.Tensor] = None, 
+        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        past_key_values: Optional[Cache] = None,
+        cache_position: Optional[torch.LongTensor] = None,
+        **kwargs: Unpack[FlashAttentionKwargs],
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
+        x = hidden_states
+
+        B, L, D = x.size()
+        QH = self.config.num_attention_heads
+        KVH = self.config.num_key_value_heads
+        N = self.config.head_dim
+        dim_att = QH * N
+
+        input_shape = x.shape[:-1]
+        hidden_shape = (*input_shape, -1, self.head_dim)
+
+        if past_key_values is not None:
+            while len(past_key_values.layer_shift_states) <= self.layer_idx:
+                past_key_values.layer_shift_states.append([torch.zeros_like(x[:, -1:])])
+            if self.layer_idx == 0:
+                x_shift_state, = past_key_values.layer_shift_states[self.layer_idx]
+                past_key_values.layer_shift_states[self.layer_idx] = [x[:, -1:]]
+                xo = x
+                xo_shift_state = x_shift_state
+                xo_prev = torch.cat([xo_shift_state, xo[:, :-1, :]], dim=1)
+                v_first = torch.stack([xo, xo_prev])
+            else:
+                x_shift_state, = past_key_values.layer_shift_states[self.layer_idx]
+                past_key_values.layer_shift_states[self.layer_idx] = [x[:, -1:]]
+                xo, xo_prev = v_first.unbind()
+
+        #dx_prev = self.time_shift(x) - x
+        dx_prev = torch.cat([x_shift_state, x[:, :-1, :]], dim=1) - x
+
+        xq = x + dx_prev * self.x_r
+        xk = x + dx_prev * self.x_k
+        xv = x + dx_prev * self.x_v
+
+        q = self.q_norm(self.q_proj(xq).view(hidden_shape)).transpose(1, 2)
+        k = self.k_norm(self.k_proj(xk).view(hidden_shape)).transpose(1, 2)
+        v = self.v_proj(xv).view(hidden_shape).transpose(1, 2)
+
+        if self.layer_idx > 0:
+            dxo_prev = xo_prev - x
+            #dxo_prev = self.time_shift(xo) - xo
+            shifted_xo = xo + dxo_prev * self.x_v
+            vo = self.v_proj(shifted_xo)
+            vo = vo.view(B, L, KVH, -1).transpose(1,2)
+        else:
+            vo = v
+
+        log_decay = F.logsigmoid(self.decay_base.view(1, 1, QH).float() + self.decay_w(x).view(B, L, QH).float()).clamp_min(math.log(0.005)) # NOTE - max is zero
+        g, v_delta = (x[:,:,:self.miss.shape[0]] @ self.miss).split(dim_att, dim=-1)
+        g = 1 + g
+
+        if self.config.balance_state:
+            k = (k * (1-log_decay.exp()).view(B, L, QH, -1).transpose(1,2)).to(q.dtype)
+
+        cos, sin = position_embeddings
+        # q, k = apply_rotary_pos_emb(q, k, cos, sin)
+
+        if past_key_values is not None:
+            # sin and cos are specific to RoPE models; cache_position needed for the static cache
+            cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
+            kvvo = torch.stack([k, v, vo])
+            kvvo, log_decay = past_key_values.update(kvvo, log_decay, self.layer_idx, cache_kwargs)
+            k, v, vo = kvvo.unbind(0)
+
+        # repeat k/v heads if n_kv_heads < n_heads
+        k = repeat_kv(k, self.num_key_value_groups)
+        v = repeat_kv(v, self.num_key_value_groups)
+        vo = repeat_kv(vo, self.num_key_value_groups)
+
+        if self.layer_idx > 0:
+            v = v + (vo - v) * torch.sigmoid(self.v0 + v_delta).view(B, L, QH, -1).transpose(1,2)
+
+        S = k.size(-2)
+
+        # e.g. -1, -1, -1 etc.
+
+        c = torch.cumsum(log_decay, dim=-2).transpose(1,2).view(B, QH, S, 1)
+        # -1, -2, -3 etc.
+
+        c = (c * ((q.size(-1) + 2) ** 0.5))#.to(q.dtype) # rescale to counteract sdpa scaling
+        ones = torch.ones_like(c)
+
+        q = (q * torch.linspace(math.e*(1+S-L)/4096, math.e*(S-1)/4096, L, device=x.device).log().clamp_min(1.0).view(1,1,L,1)).float() #to(x.dtype)
+        v = v.float()
+
+        q = torch.cat([q, c[:,:,-L:,:], ones[:,:,-L:,:]], dim=-1)
+        k = torch.cat([k.float(), ones, -c], dim=-1)
+        # qc*1+-kc*1 so like -3 - -2 = -1, so add -1 from the score pre-exp, which is equivalent to multiplying the final score by e^-1
+
+        y = nn.functional.scaled_dot_product_attention(q, k, v, dropout_p=0.0, attn_mask=attention_mask, is_causal=attention_mask is None and L==S)
+
+        if self.config.groupnorm_att:
+            y = rms_norm(y.bfloat16())
+
+        y = y.transpose(1,2)
+        y = y.reshape(*input_shape, -1)#.contiguous()
+
+        # if self.config.groupnorm_att:
+        #     y = self.ln_x(y.view(B * L, -1)).view(B, L, -1)
+
+        if self.config.gate_rank_type > 0:
+            y = y * g
+
+        y = self.o_proj(y)
+
+        attn_weights = None
+
+        return y, v_first
+
 
 class Qwen3Chunk(Qwen3Attention):
     def forward(
@@ -1644,7 +1841,7 @@ class Qwen3KeyQuant(Qwen3Attention):
         # v = v.bfloat16()
 
         if past_key_values is not None:
-            seq_len_seen = past_key_values.layer_kv_states[self.layer_idx].size(-2) if len(past_key_values.layer_kv_states) > self.layer_idx else 0
+            seq_len_seen = past_key_values.layer_key_states[self.layer_idx].size(-2) if len(past_key_values.layer_key_states) > self.layer_idx else 0
             S = seq_len_seen + L
         else:
             S = k.size(-2)
@@ -2117,22 +2314,30 @@ class RWKV7Attention(nn.Module):
         v = v.view(B, T, -1, 1, self.head_dim).expand(-1, -1, -1, self.num_key_value_groups, -1).reshape(B, T, -1)
         dropout_rate = 0.0 if not self.training else self.attention_dropout
 
+        if self.v0.shape[-2] == self.num_heads:
+        #     if v_first is None:
+        #         if self.use_k_first:
+        #             v_first = torch.cat([k,v], dim=-1)
+        #         else:
+        #             v_first = v
+        #     else:
+        #         if self.use_k_first:
+        #             v_first_k, v_first_v = torch.chunk(v_first, 2, dim=-1)
+        #             k = k + (v_first_k - k) * torch.sigmoid(self.k0 + (xv @ self.k1) @ self.k2)
+        #             v = v + (v_first_v - v) * torch.sigmoid(self.v0 + (xv @ self.v1) @ self.v2)
+        #         else:
+        #             v = v + (v_first - v) * torch.sigmoid(self.v0 + (xv @ self.v1) @ self.v2)
+
+            # if self.use_k_first:
+            #     k = k + torch.tanh(xk @ self.k1) @ self.k2
+            # v = v + torch.tanh(xv @ self.v1) @ self.v2
+            if self.use_k_first:
+                k = k + (xk @ self.k1) @ self.k2
+            v = v + (xv @ self.v1) @ self.v2
+
         kk = (k).view(B,T,H,-1).float()
         kk = (kk / (torch.norm(kk, dim=-1, keepdim=True) + 1e-12)).view(B,T,-1).to(k.dtype)
-
-        if self.v0.shape[-2] == self.num_heads:
-            if v_first is None:
-                if self.use_k_first:
-                    v_first = torch.cat([k,v], dim=-1)
-                else:
-                    v_first = v
-            else:
-                if self.use_k_first:
-                    v_first_k, v_first_v = torch.chunk(v_first, 2, dim=-1)
-                    k = k + (v_first_k - k) * torch.sigmoid(self.k0 + (xv @ self.k1) @ self.k2)
-                    v = v + (v_first_v - v) * torch.sigmoid(self.v0 + (xv @ self.v1) @ self.v2)
-                else:
-                    v = v + (v_first - v) * torch.sigmoid(self.v0 + (xv @ self.v1) @ self.v2)
+        # kk = F.normalize(k.view(B,T,H,-1), dim=-1, p=2.0).view(B,T,-1)
 
         # dealing with left-padding
         if attention_mask is not None:
@@ -2142,11 +2347,14 @@ class RWKV7Attention(nn.Module):
                 v = v * attention_mask[:, -1, -1, -v.shape[-2]:].view(B, T, 1)
                 #v = v * attention_mask[:, :, -1, -v.shape[-2]:, None]
 
-        log_w = -math.exp(-0.5) * torch.sigmoid(w_lora_result.float())       
+        #log_w = -math.exp(-0.5) * torch.sigmoid(w_lora_result.float())       
+        log_neglog_w = -0.5 - F.softplus(-w_lora_result)
+        log_w = -log_neglog_w.exp()
         w = log_w.exp()
 
         if self.config.balance_state:
             k = k * (1-w+a)
+            #k = k * (1-log_neglog_w+a) # FIXME - MOSE's broken version!
 
         r,log_w,k,v,kk,a = [i.view(B,T,self.num_heads,-1) for i in [r,log_w,k,v,kk,a]]
         if self.training:
@@ -2180,7 +2388,246 @@ class RWKV7Attention(nn.Module):
             past_key_values.update(output_vk_state, output_shift_state, self.layer_idx, q_len, is_layer_attention(self.config, self.layer_idx))
 
         return x, v_first
-    
+
+class RWKV7CAttention(nn.Module):
+    def __init__(self, config, layer_idx: Optional[int] = None):
+        super().__init__()
+        self.config = config
+        self.layer_idx = layer_idx
+        C = self.hidden_size = config.hidden_size
+        H = self.num_heads = config.num_attention_heads
+        N = self.head_dim = getattr(config, 'head_dim', self.hidden_size // self.num_heads)
+        self.num_key_value_heads = config.num_key_value_heads
+        self.num_key_value_groups = self.num_heads // self.num_key_value_heads
+        self.attention_dropout = config.attention_dropout
+
+        if self.hidden_size % self.num_heads != 0:
+            raise ValueError(
+                f"hidden_size must be divisible by num_heads (got `hidden_size`: {self.hidden_size}"
+                f" and `num_heads`: {self.num_heads})."
+            )
+        self.q_proj = nn.Linear(
+            config.hidden_size, config.num_attention_heads * self.head_dim, bias=config.attention_bias
+        )
+        self.k_proj = nn.Linear(
+            config.hidden_size, config.num_key_value_heads * self.head_dim, bias=config.attention_bias
+        )
+        self.v_proj = nn.Linear(
+            config.hidden_size, config.num_key_value_heads * self.head_dim, bias=config.attention_bias
+        )
+        self.o_proj = nn.Linear(
+            config.num_attention_heads * self.head_dim, config.hidden_size, bias=config.attention_bias
+        )
+        self.q_norm = Qwen3RMSNorm(self.head_dim, eps=config.rms_norm_eps)  # unlike olmo, only on the head dim!
+        self.k_norm = Qwen3RMSNorm(self.head_dim, eps=config.rms_norm_eps)  # thus post q_norm does not need reshape
+        self.sliding_window = config.sliding_window
+        if not (
+            self.config.use_sliding_window
+            and getattr(self.config, "sliding_window", None) is not None
+            and self.layer_idx >= self.config.max_window_layers
+        ):
+            self.sliding_window = None
+
+        calc_lora_rank = lambda exponent, multiplier: max(1, round(self.hidden_size ** exponent * multiplier / 32)) * 32
+        lora_rank_decay = config.lora_rank_decay or calc_lora_rank(0.5, 1.8)
+        lora_rank_iclr = config.lora_rank_iclr or calc_lora_rank(0.5, 1.8)
+        lora_rank_value_residual_mix = config.lora_rank_value_residual_mix or calc_lora_rank(0.5, 1.3)
+        lora_rank_gate = config.lora_rank_gate or calc_lora_rank(0.8, 0.6)
+
+        # if config.use_tokenshift:
+        #     self.x_r = nn.Parameter(torch.empty(1,1,C))
+        #     # self.x_w = nn.Parameter(torch.empty(1,1,C))
+        #     self.x_k = nn.Parameter(torch.empty(1,1,C))
+        #     self.x_v = nn.Parameter(torch.empty(1,1,C))
+        #     # self.x_a = nn.Parameter(torch.empty(1,1,C))
+        #     # self.x_g = nn.Parameter(torch.empty(1,1,C))
+
+        self.w0 = nn.Parameter(torch.empty(1,1,H*N))
+        self.w1 = nn.Parameter(torch.empty(C, lora_rank_decay))
+        self.w2 = nn.Parameter(torch.empty(lora_rank_decay, H*N))
+
+        self.a0 = nn.Parameter(torch.empty(1,1,H*N))
+        self.a1 = nn.Parameter(torch.empty(C, lora_rank_iclr))
+        self.a2 = nn.Parameter(torch.empty(lora_rank_iclr, H*N))
+
+        self.use_k_first = config.use_k_first
+        v_first_headsize = self.num_key_value_heads if config.v_first_pre_gqa else H
+        if self.use_k_first:
+            self.k0 = nn.Parameter(torch.empty(1,1,v_first_headsize*N))
+            self.k1 = nn.Parameter(torch.empty(C, lora_rank_value_residual_mix))
+            self.k2 = nn.Parameter(torch.empty(lora_rank_value_residual_mix, v_first_headsize*N))
+
+        #if layer_id > 0:
+        self.v0 = nn.Parameter(torch.empty(1,1,v_first_headsize*N))
+        self.v1 = nn.Parameter(torch.empty(C, lora_rank_value_residual_mix))
+        self.v2 = nn.Parameter(torch.empty(lora_rank_value_residual_mix, v_first_headsize*N))
+
+        if config.gate_rank_type == 1:
+            self.gate = nn.Linear(C, H*N, bias=False)
+        elif config.gate_rank_type == 2:
+            self.g1 = nn.Parameter(torch.empty(C, lora_rank_gate))
+            self.g2 = nn.Parameter(torch.empty(lora_rank_gate, H*N))
+
+        self.k_k = nn.Parameter(torch.empty(1,1,H*N))
+        self.k_a = nn.Parameter(torch.empty(1,1,H*N))
+        self.r_k = nn.Parameter(torch.empty(H,N))
+
+        if self.config.groupnorm_att:
+            self.ln_x = nn.GroupNorm(H, C, eps=self.head_dim * 1e-5)
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        frozen_residual: torch.Tensor,
+        v_first: Optional[torch.Tensor] = None, 
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_values: Optional[RWKV7State] = None,
+        output_attentions: bool = False,
+        use_cache: bool = False,
+        cache_position: Optional[torch.LongTensor] = None,
+        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        **kwargs,
+    ):
+        if attention_mask is not None:
+            assert len(attention_mask.shape) in (2, 4)
+            # assert len(attention_mask.shape) == 2, (
+            #     "Expected attention_mask as a 0-1 matrix with shape [batch_size, seq_len] "
+            #     "for padding purposes (0 indicating padding). "
+            #     "Arbitrary attention masks of shape [batch_size, seq_len, seq_len] are not allowed."
+            # )
+        
+        output_shift_state = hidden_states[:, -1:].detach().clone()
+
+        x = hidden_states
+
+        B, T, C = hidden_states.shape
+        H = self.num_heads
+        N = self.head_dim
+        q_len = T
+
+        if use_cache and past_key_values is not None and len(past_key_values) > self.layer_idx:
+            input_vk_state, input_shift_state = past_key_values[self.layer_idx]
+        else:
+            input_vk_state, input_shift_state = torch.zeros(B,H,N,N, dtype=torch.float32,device=x.device), torch.zeros_like(x[:, -1:])
+
+        xr = xw = xk = xv = xa = xg = x
+
+        # xo = v_first
+        # if self.layer_id > 0:
+        #     dxo_prev = self.time_shift(xo) - xo
+        #     shifted_xo = xo + dxo_prev * self.x_v
+        #     vo = self.v_proj(shifted_xo)
+
+        r = self.q_norm(self.q_proj(xr).view(B,T,-1,N))
+        w_lora_result = self.w0 + (torch.tanh(xw @ self.w1) @ self.w2).float()
+        k = self.k_norm(self.k_proj(xk).view(B,T,-1,N))
+        v = self.v_proj(xv)
+        a = torch.sigmoid(self.a0 + (xa @ self.a1) @ self.a2)
+        if self.config.gate_rank_type == 1:
+            g = torch.sigmoid(self.gate(xg))
+        elif self.config.gate_rank_type == 2:
+            g = torch.sigmoid(xg @ self.g1) @ self.g2
+        
+        if position_embeddings is not None:
+            cos, sin = position_embeddings
+            r, k = apply_rotary_pos_emb(r, k, cos, sin, unsqueeze_dim=2)
+
+        if self.v0.shape[-2] == self.num_key_value_heads:
+            if v_first is None:
+                if self.use_k_first:
+                    v_first = torch.cat([k,v], dim=-1)
+                else:
+                    v_first = v
+            else:
+                if self.use_k_first:
+                    v_first_k, v_first_v = torch.chunk(v_first, 2, dim=-1)
+                    k = k + (v_first_k - k) * torch.sigmoid(self.k0 + (xv @ self.k1) @ self.k2)
+                    v = v + (v_first_v - v) * torch.sigmoid(self.v0 + (xv @ self.v1) @ self.v2)
+                else:
+                    v = v + (v_first - v) * torch.sigmoid(self.v0 + (xv @ self.v1) @ self.v2)
+
+        # repeat k/v heads if n_kv_heads < n_heads
+        k = k.view(B, T, -1, 1, self.head_dim).expand(-1, -1, -1, self.num_key_value_groups, -1).reshape(B, T, -1)
+        v = v.view(B, T, -1, 1, self.head_dim).expand(-1, -1, -1, self.num_key_value_groups, -1).reshape(B, T, -1)
+        dropout_rate = 0.0 if not self.training else self.attention_dropout
+
+        #kk = (k).view(B,T,H,-1).float()
+        #kk = (kk / (torch.norm(kk, dim=-1, keepdim=True) + 1e-12)).view(B,T,-1).to(k.dtype)
+        kk = F.normalize(k.view(B,T,H,-1), dim=-1, p=2.0).view(B,T,-1)
+
+        if self.v0.shape[-2] == self.num_heads:
+            if v_first is None:
+                if self.use_k_first:
+                    v_first = torch.cat([k,v], dim=-1)
+                else:
+                    v_first = v
+            else:
+                if self.use_k_first:
+                    v_first_k, v_first_v = torch.chunk(v_first, 2, dim=-1)
+                    k = k + (v_first_k - k) * torch.sigmoid(self.k0 + (xv @ self.k1) @ self.k2)
+                    v = v + (v_first_v - v) * torch.sigmoid(self.v0 + (xv @ self.v1) @ self.v2)
+                else:
+                    v = v + (v_first - v) * torch.sigmoid(self.v0 + (xv @ self.v1) @ self.v2)
+
+        # if self.layer_id > 0:
+        #     v_delta = (xv @ self.v1) @ self.v2
+        #     vo = vo.view(B, T, -1, 1, self.head_dim).expand(-1, -1, -1, self.num_key_value_groups, -1).reshape(B, T, -1)
+        #     v = v + (vo - v) * torch.sigmoid(self.v0 + v_delta)
+
+        # dealing with left-padding
+        if attention_mask is not None:
+            if len(attention_mask.shape) == 2:
+                v = v * attention_mask[:, -v.shape[-2]:, None]
+            elif len(attention_mask.shape) == 4:
+                v = v * attention_mask[:, -1, -1, -v.shape[-2]:].view(B, T, 1)
+                #v = v * attention_mask[:, :, -1, -v.shape[-2]:, None]
+
+        log_w = -math.exp(-0.5) * torch.sigmoid(w_lora_result.float())       
+        #w = log_w.exp()
+
+        if self.config.balance_state:
+            # rwkv-7c-alike
+            k = k * a
+            # k = k * (1-w+a)
+
+        r,log_w,k,v,kk,a = [i.view(B,T,self.num_heads,-1) for i in [r,log_w,k,v,kk,a]]
+        if self.training:
+            x, output_vk_state = chunk_rwkv7(r, log_w, k, v, -kk, kk*a, initial_state=input_vk_state, output_final_state=use_cache)
+        else:
+            # if T == 1:
+            #     output_vk_state = input_vk_state
+            #     for t in range(T):
+            #         r_, w_, k_, v_, kk_, a_ = r[:,t], w[:,t], k[:,t], v[:,t], kk[:,t], a[:,t]
+            #         vk = v_.view(B,H,N,1) @ k_.view(B,H,1,N)
+            #         ab = (-kk_).view(B,H,N,1) @ (kk_*a_).view(B,H,1,N)
+            #         output_vk_state = output_vk_state * w_.view(B,H,1,N) + output_vk_state @ ab.float() + vk.float()
+            #         x[:,t] = (output_vk_state.to(dtype=x.dtype) @ r_.view(B,H,N,1)).view(B,H*N)
+            #     # FIXME - support fast triton kernel for non-training pre-fill with state in and out
+            # else:
+            x, output_vk_state = fused_recurrent_rwkv7(r, log_w, k, v, -kk, kk*a, initial_state=input_vk_state, output_final_state=use_cache)
+
+        if self.config.groupnorm_att:
+            x = torch.nn.functional.group_norm(x.view(B*T,H*N).float(), num_groups=H, weight=self.ln_x.weight.float(), bias=self.ln_x.bias.float(), eps = self.ln_x.eps).view(B,T,H*N).to(v.dtype)
+        else:
+            x = (x.view(B,T,H*N) * N ** -0.5).to(v.dtype)
+
+        if self.config.use_bonus:
+            # x = x + ((r.to(v.dtype).view(B,T,H,-1)*k.to(v.dtype).view(B,T,H,-1)*self.r_k).sum(dim=-1, keepdim=True) * v.view(B,T,H,-1)).view(B,T,-1)
+            # RWKV-7c alike
+            u = 1.0 - torch.linalg.vector_norm(x.view(B,T,H,-1), dim=-1, keepdim=True) / (torch.linalg.vector_norm(v.view(B,T,H,-1), dim=-1, keepdim=True) + 1e-12)
+            u = u * self.r_k.sigmoid()
+            x = (x.view(B,T,H,-1) + v*u).view(B,T,-1)
+
+        if self.config.gate_rank_type != 0:
+            x = x * g
+        x = self.o_proj(x)
+
+        if past_key_values is not None:
+            past_key_values.update(output_vk_state, output_shift_state, self.layer_idx, q_len, is_layer_attention(self.config, self.layer_idx))
+
+        return x, v_first
+        
 class RWKV7Qwen3DecoderLayer(nn.Module):
     def __init__(self, config: RWKV7Qwen3Config, layer_idx: int):
         nn.Module.__init__(self)
@@ -2188,9 +2635,9 @@ class RWKV7Qwen3DecoderLayer(nn.Module):
         self.layer_idx = layer_idx
 
         if is_layer_attention(config, layer_idx):
-            att_fn = Qwen3Attention #Qwen3KeyQuant #Qwen3SWAPrefill #Qwen3DropoutSWASink #Qwen3AttentionNoPE #Qwen3MOBA #Qwen3AttentionVerticalSparse # Qwen3DoubleAttention # Qwen3SymPow #Qwen3Chunk #Qwen3Power #Qwen3MOBA #Qwen3Attention # Qwen3NewAttention # Qwen3AttentionAdapted
+            att_fn = Qwen3AttentionNoPE #Qwen3AttentionNoPESSMax #Qwen3FoXAttention ##Qwen3AttentionNoPE #Qwen3KeyQuant #Qwen3SWAPrefill #Qwen3DropoutSWASink #Qwen3AttentionNoPE #Qwen3MOBA #Qwen3AttentionVerticalSparse # Qwen3DoubleAttention # Qwen3SymPow #Qwen3Chunk #Qwen3Power #Qwen3MOBA #Qwen3Attention # Qwen3NewAttention # Qwen3AttentionAdapted
         else:
-            att_fn = RWKV7Attention
+            att_fn = RWKV7Attention #RWKV7CAttention #Qwen3SWASink #
         
         self.self_attn = att_fn(config, layer_idx)
 

@@ -1,0 +1,52 @@
+model:
+  ctx_len: 4096
+
+train:
+  wandb: qwen2rwkv_nope
+  
+  proj_suffix: 2
+  train_stage: 3
+  load_partial: 0
+
+  data_type: "jsonl" 
+  #data_file: "data/dclm2" 
+  #data_file: "data/dclm-bigbrain" 
+  data_file: "data/mose/instruct,data/mose/raw"
+  #data_type: "binidx" 
+  #data_file: "data/dclm-bigbrain-1B" #"data/dclm-10B" #"data/minipile_qwen2" 
+  my_exit_tokens: 600000000 #1491785955
+  magic_prime: 236573 #366227 # 2913641 # 364193
+
+  optimizer: dsfusedadamw
+  #optimizer: adamwschedulefree
+  lr_wait: 0.833
+  lr_endpoint: 0.875
+  lr_decay_type: cos
+  lr_init: 1e-5 #7e-6
+  lr_final: 1e-5 #7e-6
+  lr2_init: 1e-5 #1e-4
+  lr2_final: 1e-5 #7e-6
+  warmup_steps: 100 #50
+  beta1: 0.9 
+  beta2: 0.95 
+  adam_eps: 1e-8 
+  weight_decay: 0
+
+  devices: 8
+  num_nodes: 1
+  micro_bsz: 4 # 12
+  accumulate_grad_batches: 1 # 32 total bsz
+  strategy: deepspeed_stage_1 #fsdp 
+  grad_cp: 1
+  ds_bucket_mb: 200 # set to 2 for consumer GPUs, set to 200 for A100 / H100 (affects speed & vram usage)
+
+  #gradient_clip_val: 0
+
+  epoch_save: 1
+  tokens_save: 50000000
+
+  attention_distillation_stage: 2
+  
+  teacher:
+    kl_weight: 1.0
+    ce_weight: 0.0

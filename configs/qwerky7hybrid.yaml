@@ -1,0 +1,32 @@
+model:
+  tmix: qwerky7
+  attention_type: rwkv7_wind_backstepping_longhead # rwkv7_wind_triton_bighead # rwkv7_wind_replaystepping_longhead # 
+  reinit_att: 0
+  gate_rank_type: 2
+  use_pos_emb: 1
+  balance_state: 1
+  groupnorm_att: 0
+  use_bonus: 0 #1
+  #preserve_last_n_layers: 18
+  #attention_layers: [22,17,9,20,33,24,34,32]
+  attention_layers: [16, 19, 21, 24, 25] # [19, 23, 24, 26, 27] for instruct
+  #lora_rank_decay: 480
+  #lora_rank_iclr: 160
+  #lora_rank_value_residual_mix: 128
+  #lora_rank_gate: 480
+  # lora_rank_decay: 256
+  # lora_rank_value_residual_mix: 256
+  lora_rank_decay: 256
+  lora_rank_iclr: 128
+  lora_rank_value_residual_mix: 64
+  lora_rank_gate: 256
+    #lora_rank_gate: 256
+  #preserve_last_n_layers: 9999
+  #attention_striping: 5
+  #replace_last_n_layers: 4
+  use_k_first: 0
+  v_first_pre_gqa: 0
+  #last_striping_layer: 21
+  #replace_last_n_layers: 8
+  #attention_striping: 7
+  #last_striping_layer: 23

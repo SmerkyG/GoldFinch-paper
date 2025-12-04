@@ -47,9 +47,9 @@ train:
   optimizer: dsfusedadamw
   #optimizer: adamwschedulefree
   lr_decay_type: cos
-  lr_init: 1e-3
-  lr_final: 7e-6
-  warmup_steps: 50
+  lr_init: 1e-4 #1e-3
+  lr_final: 1e-4 #7e-6
+  warmup_steps: 100 #50
   beta1: 0.9 
   beta2: 0.95
   adam_eps: 1e-8 

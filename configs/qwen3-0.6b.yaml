@@ -1,0 +1,18 @@
+model:
+    __type__: configs.Transformer_Config
+    tmix: qwen3
+    tmix2: qwen3
+    classname: qwen3
+    ctx_len: 512 # 4096
+    vocab_size: 151936
+    vocab_padding_idx: 151646 
+    num_key_value_heads: 8
+    head_size: 128
+    n_embd: 1024
+    dim_att: 2048
+    dim_ffn: 3072
+    rms_norm_eps: 1e-6
+    n_layer: 28
+    rope:
+        __type__: configs.RoPE_Config
+        base: 1000000.0

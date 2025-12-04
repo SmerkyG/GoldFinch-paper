@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field, fields, _HAS_DEFAULT_FACTORY
 import datetime
 import typing
 
@@ -25,6 +25,7 @@ class Model_Config:
     replace_last_n_layers:int = 0
     attention_striping:int = 1
     last_striping_layer:int = 99999
+    attention_layers:list = field(default_factory=list)
     kv_cache_compression_ratio:float = 16
 
     rms_norm_eps:float = 1e-06
@@ -345,6 +346,11 @@ def typecheck(path : str, obj : typing.Any, required_type : type = typing.Any, p
                         errors += typecheck(k if path == '' else path + '.' + k, obj[k], rt, obj, k)
                     elif param.default == inspect.Parameter.empty:               
                         return f'Required parameter `{path}.{k}` missing in {required_type}\n'
+                    elif param.default == _HAS_DEFAULT_FACTORY:
+                        # explicitly create defaults with factories in the dataclass
+                        for f in fields(required_type):
+                            if f.name == k:
+                                obj[k] = f.default_factory()
                     else:
                         # add default value into config
                         obj[k] = param.default

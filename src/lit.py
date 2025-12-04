@@ -9,6 +9,7 @@ from torch.nn import functional as F
 import lightning.pytorch as pl
 from lightning_utilities.core.rank_zero import rank_zero_info, rank_zero_only
 from lightning.pytorch.strategies import DeepSpeedStrategy
+from lightning.pytorch.utilities import grad_norm
 
 import pickle
 import torch.distributed as dist
@@ -28,6 +29,8 @@ from contextlib import nullcontext
 from accelerate import init_empty_weights as init_on_meta_device
 
 from src.logger import print0 as print
+
+import deepspeed.utils
 
 def console_clear_last_line():
     print('\033[1A', end='\x1b[2K')
@@ -455,6 +458,31 @@ class LightningModelWrapper(pl.LightningModule):
         return False
 
 
+    def on_before_optimizer_step(self, optimizer):
+        if self.config.train.attention_distillation_stage not in (1, ):
+            return
+        strategy = self.trainer.strategy
+        if isinstance(strategy, DeepSpeedStrategy):
+            global_grad_norm = strategy.deepspeed_engine.get_global_grad_norm()
+            print('global_grad_norm', global_grad_norm)
+        
+    # def on_after_backward(self):
+    #     if self.config.train.attention_distillation_stage in (1, ):
+    #         for decoder_layer in self.model.model.layers:
+    #             attn = decoder_layer.self_attn
+                        
+    #             total_norm = 0.0
+    #             total_count = 0
+    #             for p in attn.parameters():
+    #                 with deepspeed.zero.GatheredParameters(p, modifier_rank=0):
+    #                     full_grad = deepspeed.utils.safe_get_full_grad(p)                    
+    #                     if full_grad is not None:
+    #                         param_norm = full_grad.detach().data.norm(2)
+    #                         total_norm += param_norm.item() ** 2
+    #                         total_count += 1
+    #             total_norm = total_norm ** 0.5
+    #             print('ln', decoder_layer.layer_id, total_count, total_norm)
+
     def _get_loss_logits_preds(self, batch, batch_idx, last_model_state):
         #x, y = batch
         x, attention_mask, y = batch['input_ids'], batch['attention_mask'], batch['labels']
@@ -510,21 +538,62 @@ class LightningModelWrapper(pl.LightningModule):
                         training_loss = training_loss.float().mean()
                     training_loss = training_loss / results.attentions[0].size(-1) # FIXME - not quite perfect because the average will be brought down by uncounted EOS tokens
                 else: # self.config.train.attention_distillation_stage == 1:
-                    #results.post_attention_hidden_states = results.post_attention_hidden_states[:self.config.model.n_layer-self.config.model.preserve_last_n_layers]
-                    #results.student_post_attention_hidden_states = results.student_post_attention_hidden_states[:self.config.model.n_layer-self.config.model.preserve_last_n_layers]
-                    training_loss = torch.linalg.vector_norm(torch.cat(results.post_attention_hidden_states, dim=0) - torch.cat(results.student_post_attention_hidden_states, dim=0), dim=-1)
+                    # overall_scaling_constant = 175.0 / 64 # 175 was measured avg last layer norm for qwen3-8b, and 64 was sqrt(4096) hidden size for 8B
+                    # #overall_scaling_constant = 50.0 / 64 # approx 50 / 64, where 64 was sqrt(4096) hidden size for 8B
+                    # overall_scaling_factor = overall_scaling_constant / torch.linalg.vector_norm(results.post_attention_hidden_states[-1], dim=-1).mean()
+                    # # L,B,T,C
+                    # layer_scaling_factors = torch.linalg.vector_norm(results.post_attention_hidden_states[-1], dim=-1).unsqueeze(0).mean(dim=[1,2]) / torch.linalg.vector_norm(torch.stack(results.post_attention_hidden_states), dim=-1).mean(dim=[1,2])
+                    # #results.post_attention_hidden_states = results.post_attention_hidden_states[:self.config.model.n_layer-self.config.model.preserve_last_n_layers]
+                    # #results.student_post_attention_hidden_states = results.student_post_attention_hidden_states[:self.config.model.n_layer-self.config.model.preserve_last_n_layers]
+                    # stacked_post_attention_hidden_states = torch.stack(results.post_attention_hidden_states) * layer_scaling_factors.view(-1,1,1,1)
+                    # stacked_student_post_attention_hidden_states = torch.stack(results.student_post_attention_hidden_states) * layer_scaling_factors.view(-1,1,1,1)
+                    # training_loss = torch.linalg.vector_norm(stacked_post_attention_hidden_states - stacked_student_post_attention_hidden_states, dim=-1)
+                    # if batch_idx % 100 == 0:
+                    #     print("Last layer norm", torch.linalg.vector_norm(results.post_attention_hidden_states[-1], dim=-1).mean().item())
+                    #     print('per layer losses')
+                    #     for i in range(len(results.post_attention_hidden_states)):
+                    #         layer_loss = torch.linalg.vector_norm(results.post_attention_hidden_states[i] - results.student_post_attention_hidden_states[i], dim=-1).mean()
+                    #         print(i, layer_loss.item(), 'scaling factor:', layer_scaling_factors[i].item())
+                    # if use_loss_mask:
+                    #     repeated_loss_mask = loss_mask.repeat(len(results.post_attention_hidden_states), 1)
+                    #     training_loss = training_loss * repeated_loss_mask
+                    #     training_loss = training_loss.sum() / (repeated_loss_mask.sum() + 1e-8)
+                    # else:
+                    #     training_loss = training_loss.float().mean()
+                    # old_style_training_loss = torch.linalg.vector_norm(torch.cat(results.post_attention_hidden_states, dim=0) - torch.cat(results.student_post_attention_hidden_states, dim=0), dim=-1).float().mean() * (results.post_attention_hidden_states[0].size(-1) ** -0.5)
+                    # print("old style loss:", old_style_training_loss.item())
+                    # #training_loss = training_loss * (results.post_attention_hidden_states[0].size(-1) ** -0.5) 
+                    # training_loss = training_loss * overall_scaling_factor
+                    # # FIXME - not quite perfect because the average will be brought down by uncounted EOS tokens
+
+                    t = torch.stack(results.post_attention_hidden_states, dim=0).float()
+                    s = torch.stack(results.student_post_attention_hidden_states, dim=0).float()
+                    #manual_loss_scaling = (results.post_attention_hidden_states[0].size(-1) ** -0.5)
+                    #manual_loss_scaling = 250
+                    #s_normed = F.normalize(s, dim=-1)
+                    #t_normed = F.normalize(t, dim=-1)
+                    #s_norm = torch.linalg.vector_norm(s, dim=-1, keepdim=True) + 1e-12
+                    t_norm = torch.linalg.vector_norm(t, dim=-1, keepdim=True) + 1e-12
+                    s_normed = s / t_norm
+                    t_normed = t / t_norm
+                    #training_loss = torch.linalg.vector_norm(t - s, dim=-1).mean() * (results.post_attention_hidden_states[0].size(-1) ** -0.5)
+                    #training_loss = torch.linalg.vector_norm(t_normed - s_normed, dim=-1).mean()
+                    #training_loss = F.mse_loss(t, s)
+                    training_loss = F.mse_loss(t_normed, s_normed) * (t.shape[-1] / 10.0)
+                    #s_normed = F.normalize(s, dim=-1)
+                    #t_normed = F.normalize(t, dim=-1)
+                    #training_loss = F.mse_loss(t_normed, s_normed)
+                    #training_loss = training_loss * manual_loss_scaling
+
+                    old_style_training_loss = torch.linalg.vector_norm(t - s, dim=-1).float().mean() * (results.post_attention_hidden_states[0].size(-1) ** -0.5)
+                    print("old style loss:", old_style_training_loss.item())
+
                     if batch_idx % 100 == 0:
                         print('per layer losses')
                         for i in range(len(results.post_attention_hidden_states)):
                             layer_loss = torch.linalg.vector_norm(results.post_attention_hidden_states[i] - results.student_post_attention_hidden_states[i], dim=-1).mean()
                             print(i, layer_loss.item())
-                    if use_loss_mask:
-                        repeated_loss_mask = loss_mask.repeat(len(results.post_attention_hidden_states), 1)
-                        training_loss = training_loss * repeated_loss_mask
-                        training_loss = training_loss.sum() / (repeated_loss_mask.sum() + 1e-8)
-                    else:
-                        training_loss = training_loss.float().mean()
-                    training_loss = training_loss * (results.post_attention_hidden_states[0].size(-1) ** -0.5) # FIXME - not quite perfect because the average will be brought down by uncounted EOS tokens
+
             reported_loss = training_loss
             logits = torch.tensor([], device=x.device)
             preds = torch.zeros_like(y)

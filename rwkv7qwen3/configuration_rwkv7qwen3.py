@@ -166,6 +166,7 @@ class RWKV7Qwen3Config(PretrainedConfig):
         first_post_attention_layer=9999,
         attention_striping=1,
         last_striping_layer=99999,
+        attention_layers=None,
         layer_types=None,
         attention_dropout=0.0,
         attention_bias=True,
@@ -192,6 +193,7 @@ class RWKV7Qwen3Config(PretrainedConfig):
         self.first_post_attention_layer = first_post_attention_layer
         self.attention_striping = attention_striping
         self.last_striping_layer = last_striping_layer
+        self.attention_layers = [] if attention_layers is None else attention_layers
 
         # for backward compatibility
         if num_key_value_heads is None:
