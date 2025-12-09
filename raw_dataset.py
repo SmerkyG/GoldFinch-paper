@@ -335,6 +335,7 @@ class TypedStreamingCLMDataCollator:
     def concatenate_if_needed(self, example) -> str: #text: str, is_conversation: bool) -> str:
         """Concatenate text with random samples of the same type if it's too short"""
         text = example['text']
+        is_conversation = example['is_conversation']
         #text = text[random.randrange(0, max(1, len(text) - 128)):] # FIXME - randomizing offset
         
         if not self.packing:
@@ -343,21 +344,21 @@ class TypedStreamingCLMDataCollator:
         tokens = self.tokenizer(text, truncation=False)
         current_length = len(tokens['input_ids'])
         
-        max_attempts = 10
+        max_attempts = 1000000000
         attempts = 0
         
         while current_length < self.min_length and attempts < max_attempts:
-            new_idx = (example['dataloader_idx']+(attempts+1)) % len(self.typed_dataset)
-            #print('new_idx', new_idx)
-            new_example = self.typed_dataset[new_idx]
-            sample_text, is_conversation = new_example['text'], new_example['dataloader_idx'] < self.typed_dataset.total_conversation
-            #sample_text, sample_is_conversation = self.typed_dataset.get_random_sample(is_conversation)
+            # new_idx = (example['dataloader_idx']+(attempts+1)) % len(self.typed_dataset)
+            # #print('new_idx', new_idx)
+            # new_example = self.typed_dataset[new_idx]
+            # sample_text, is_conversation = new_example['text'], new_example['dataloader_idx'] < self.typed_dataset.total_conversation
+            sample_text, sample_is_conversation = self.typed_dataset.get_random_sample(is_conversation)
             
             if is_conversation:
                 text += sample_text
             else:
-                #text += "\n\n" + sample_text
-                text += self.tokenizer.eos_token + sample_text
+                text += "\n\n" + sample_text # Mose's way
+                #text += self.tokenizer.eos_token + sample_text
             
             tokens = self.tokenizer(text, truncation=False)
             current_length = len(tokens['input_ids'])
@@ -385,7 +386,7 @@ class TypedStreamingCLMDataCollator:
         tokenized = self.tokenizer(
             texts,
             truncation=True,
-            max_length=self.max_length + 1, # FIXME - fixed this from max_length without one added
+            max_length=self.max_length, # + 1, # FIXME - fixed this from max_length without one added
             padding="max_length",
             return_tensors="pt",
             padding_side=self.padding_side
@@ -393,35 +394,35 @@ class TypedStreamingCLMDataCollator:
 
         #print("collated rank", _get_rank(), "text", self.tokenizer.decode(tokenized['input_ids'][0, :].tolist()))
 
-        input_ids = tokenized["input_ids"][:, :-1]
-        attention_mask = tokenized["attention_mask"][:, :-1]
-        labels = tokenized["input_ids"][:, 1:].clone()
-        #labels[attention_mask == 0] = -100
+        # input_ids = tokenized["input_ids"][:, :-1]
+        # attention_mask = tokenized["attention_mask"][:, :-1]
+        # labels = tokenized["input_ids"][:, 1:].clone()
+        # #labels[attention_mask == 0] = -100
 
-        assert input_ids.shape[1] == self.max_length, f"{input_ids.shape[1]} {self.max_length}"
+        # assert input_ids.shape[1] == self.max_length, f"{input_ids.shape[1]} {self.max_length}"
        
         # FIXME - this code was totally wrong
 
-        # input_ids = tokenized["input_ids"]
-        # attention_mask = tokenized["attention_mask"]
-        # labels = input_ids.clone()
+        input_ids = tokenized["input_ids"]
+        attention_mask = tokenized["attention_mask"]
+        labels = input_ids.clone()
         
-        # # Shift labels for next token prediction
-        # if self.padding_side == "right":
-        #     labels[:, :-1] = input_ids[:, 1:]
-        #     last_token = self.tokenizer.pad_token_id
-        #     labels[:, -1] = last_token
-        # else:
-        #     labels[:, 1:] = input_ids[:, :-1]
-        #     first_token = self.tokenizer.pad_token_id 
-        #     labels[:, 0] = first_token
+        # Shift labels for next token prediction
+        if self.padding_side == "right":
+            labels[:, :-1] = input_ids[:, 1:]
+            last_token = self.tokenizer.pad_token_id
+            labels[:, -1] = last_token
+        else:
+            labels[:, 1:] = input_ids[:, :-1]
+            first_token = self.tokenizer.pad_token_id 
+            labels[:, 0] = first_token
         
-        # # Handle padding in labels
-        # labels[attention_mask == 0] = -100
-        # padding_start = attention_mask.sum(dim=1) - 1
-        # for i in range(len(padding_start)):
-        #     if padding_start[i] > 0:
-        #         labels[i, padding_start[i]] = -100
+        # Handle padding in labels
+        labels[attention_mask == 0] = -100
+        padding_start = attention_mask.sum(dim=1) - 1
+        for i in range(len(padding_start)):
+            if padding_start[i] > 0:
+                labels[i, padding_start[i]] = -100
             
         return {
             "input_ids": input_ids,

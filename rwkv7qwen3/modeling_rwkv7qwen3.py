@@ -2226,9 +2226,10 @@ class RWKV7Attention(nn.Module):
             self.k2 = nn.Parameter(torch.empty(lora_rank_value_residual_mix, v_first_headsize*N))
 
         #if layer_id > 0:
-        self.v0 = nn.Parameter(torch.empty(1,1,v_first_headsize*N))
+        #self.v0 = nn.Parameter(torch.empty(1,1,v_first_headsize*N))
         self.v1 = nn.Parameter(torch.empty(C, lora_rank_value_residual_mix))
         self.v2 = nn.Parameter(torch.empty(lora_rank_value_residual_mix, v_first_headsize*N))
+        self.D_MV_LoRA_Scaling = 0.2
 
         if config.gate_rank_type == 1:
             self.gate = nn.Linear(C, H*N, bias=False)
@@ -2236,9 +2237,9 @@ class RWKV7Attention(nn.Module):
             self.g1 = nn.Parameter(torch.empty(C, lora_rank_gate))
             self.g2 = nn.Parameter(torch.empty(lora_rank_gate, H*N))
 
-        self.k_k = nn.Parameter(torch.empty(1,1,H*N))
-        self.k_a = nn.Parameter(torch.empty(1,1,H*N))
-        self.r_k = nn.Parameter(torch.empty(H,N))
+        # self.k_k = nn.Parameter(torch.empty(1,1,H*N))
+        # self.k_a = nn.Parameter(torch.empty(1,1,H*N))
+        # self.r_k = nn.Parameter(torch.empty(H,N))
 
         if self.config.groupnorm_att:
             self.ln_x = nn.GroupNorm(H, C, eps=self.head_dim * 1e-5)
@@ -2295,26 +2296,7 @@ class RWKV7Attention(nn.Module):
             cos, sin = position_embeddings
             r, k = apply_rotary_pos_emb(r, k, cos, sin, unsqueeze_dim=2)
 
-        if self.v0.shape[-2] == self.num_key_value_heads:
-            if v_first is None:
-                if self.use_k_first:
-                    v_first = torch.cat([k,v], dim=-1)
-                else:
-                    v_first = v
-            else:
-                if self.use_k_first:
-                    v_first_k, v_first_v = torch.chunk(v_first, 2, dim=-1)
-                    k = k + (v_first_k - k) * torch.sigmoid(self.k0 + (xv @ self.k1) @ self.k2)
-                    v = v + (v_first_v - v) * torch.sigmoid(self.v0 + (xv @ self.v1) @ self.v2)
-                else:
-                    v = v + (v_first - v) * torch.sigmoid(self.v0 + (xv @ self.v1) @ self.v2)
-
-        # repeat k/v heads if n_kv_heads < n_heads
-        k = k.view(B, T, -1, 1, self.head_dim).expand(-1, -1, -1, self.num_key_value_groups, -1).reshape(B, T, -1)
-        v = v.view(B, T, -1, 1, self.head_dim).expand(-1, -1, -1, self.num_key_value_groups, -1).reshape(B, T, -1)
-        dropout_rate = 0.0 if not self.training else self.attention_dropout
-
-        if self.v0.shape[-2] == self.num_heads:
+        # if self.v0.shape[-2] == self.num_key_value_heads:
         #     if v_first is None:
         #         if self.use_k_first:
         #             v_first = torch.cat([k,v], dim=-1)
@@ -2328,12 +2310,31 @@ class RWKV7Attention(nn.Module):
         #         else:
         #             v = v + (v_first - v) * torch.sigmoid(self.v0 + (xv @ self.v1) @ self.v2)
 
-            # if self.use_k_first:
-            #     k = k + torch.tanh(xk @ self.k1) @ self.k2
-            # v = v + torch.tanh(xv @ self.v1) @ self.v2
-            if self.use_k_first:
-                k = k + (xk @ self.k1) @ self.k2
-            v = v + (xv @ self.v1) @ self.v2
+        # repeat k/v heads if n_kv_heads < n_heads
+        k = k.view(B, T, -1, 1, self.head_dim).expand(-1, -1, -1, self.num_key_value_groups, -1).reshape(B, T, -1)
+        v = v.view(B, T, -1, 1, self.head_dim).expand(-1, -1, -1, self.num_key_value_groups, -1).reshape(B, T, -1)
+        dropout_rate = 0.0 if not self.training else self.attention_dropout
+
+        # if self.v0.shape[-2] == self.num_heads:
+        #     if v_first is None:
+        #         if self.use_k_first:
+        #             v_first = torch.cat([k,v], dim=-1)
+        #         else:
+        #             v_first = v
+        #     else:
+        #         if self.use_k_first:
+        #             v_first_k, v_first_v = torch.chunk(v_first, 2, dim=-1)
+        #             k = k + (v_first_k - k) * torch.sigmoid(self.k0 + (xv @ self.k1) @ self.k2)
+        #             v = v + (v_first_v - v) * torch.sigmoid(self.v0 + (xv @ self.v1) @ self.v2)
+        #         else:
+        #             v = v + (v_first - v) * torch.sigmoid(self.v0 + (xv @ self.v1) @ self.v2)
+
+        # if self.use_k_first:
+        #     k = k + torch.tanh(xk @ self.k1) @ self.k2
+        # v = v + torch.tanh(xv @ self.v1) @ self.v2
+        if self.use_k_first:
+            k = k + (xk @ self.k1) @ self.k2
+        v = v + (xv @ self.v1) @ self.v2 * self.D_MV_LoRA_Scaling
 
         kk = (k).view(B,T,H,-1).float()
         kk = (kk / (torch.norm(kk, dim=-1, keepdim=True) + 1e-12)).view(B,T,-1).to(k.dtype)

@@ -1,7 +1,11 @@
 model:
   ctx_len: 512
 
+  attention_layers: [] # no nope in stage 1 for now
+
 train:
+  wandb: qwen2rwkv_nope_stage1
+
   proj_suffix: 1
   train_stage: 3
   load_partial: 1
@@ -44,22 +48,22 @@ train:
 
   magic_prime: 2929793
 
-  optimizer: dsfusedadamw
+  optimizer: adamw #dsfusedadamw
   #optimizer: adamwschedulefree
   lr_decay_type: cos
   lr_init: 1e-4 #1e-3
   lr_final: 1e-4 #7e-6
-  warmup_steps: 100 #50
+  warmup_steps: 50
   beta1: 0.9 
-  beta2: 0.95
+  beta2: 0.98 #0.95
   adam_eps: 1e-8 
-  weight_decay: 0
+  weight_decay: 0.1 #0
 
   devices: 8
   num_nodes: 1
   micro_bsz: 4
   accumulate_grad_batches: 1 # total bsz 32
-  strategy: deepspeed_stage_1 #fsdp # ddp_find_unused_parameters_true # fsdp #
+  strategy: deepspeed_stage_2 #fsdp # ddp_find_unused_parameters_true # fsdp #
   grad_cp: 0
   ds_bucket_mb: 200 # set to 2 for consumer GPUs, set to 200 for A100 / H100 (affects speed & vram usage)
     

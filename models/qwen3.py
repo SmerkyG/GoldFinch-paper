@@ -10,8 +10,6 @@ from src.state import ModelState, BlockState, ChannelMixState, TimeMixState, Sha
 
 from configs import TrainerCLI_Config, Model_Config, Transformer_Config, Train_Config
 
-from src.rotary import generate_rotary_embedding, generate_binary_rotary_embedding, apply_rotary_embedding
-
 from src.CoreDependencies import *
 
 from dataclasses import dataclass
@@ -346,15 +344,91 @@ class Qwen3RMSNorm(nn.Module):
     def extra_repr(self):
         return f"{tuple(self.weight.shape)}, eps={self.variance_epsilon}"
 
-def generate_rotary_embedding(max_seqlen:int, dim:int, theta:float = 10000.0, scale:float = 1):
-    #inv_freq = 1.0 / (theta ** (torch.arange(0, dim, 2, dtype=torch.float).to(device) / dim))
+class Qwen3RotaryEmbedding(nn.Module):
+    inv_freq: torch.Tensor  # fix linting for `register_buffer`
 
-    angular_velocity = theta ** -(torch.arange(0, dim, 2, dtype=torch.float) / dim) / scale # frequencies from 1.0 ... 1/theta
-    angles = torch.outer(torch.arange(max_seqlen), angular_velocity)
-    # Different from paper, but it uses a different permutation in order to obtain the same calculation
-    emb = torch.cat((angles, angles), dim=-1)
-    return torch.stack([emb.cos(), emb.sin()], dim=0)
-    #return torch.polar(torch.ones_like(angles), angles)
+    def __init__(self, device, dim, base):
+        super().__init__()
+
+        self.dim = dim
+        self.base = base
+
+        # self.max_seq_len_cached = max_position_embeddings #config.max_position_embeddings
+        # self.original_max_seq_len = max_position_embeddings #config.max_position_embeddings
+
+        # self.config = config
+
+        # self.rope_type = self.config.rope_parameters["rope_type"]
+        # rope_init_fn: Callable = self.compute_default_rope_parameters
+        # if self.rope_type != "default":
+        #     rope_init_fn = ROPE_INIT_FUNCTIONS[self.rope_type]
+        # inv_freq, self.attention_scaling = rope_init_fn(self.config, device)
+
+        # Compute the inverse frequencies
+        inv_freq = 1.0 / (
+            base ** (torch.arange(0, dim, 2, dtype=torch.int64).to(device=device, dtype=torch.float) / dim)
+        )
+        self.attention_scaling = 1.0
+
+        self.register_buffer("inv_freq", inv_freq, persistent=False)
+        self.original_inv_freq = inv_freq
+
+    # @staticmethod
+    # def compute_default_rope_parameters(
+    #     config: Optional[Qwen3Config] = None,
+    #     device: Optional["torch.device"] = None,
+    #     seq_len: Optional[int] = None,
+    # ) -> tuple["torch.Tensor", float]:
+    #     """
+    #     Computes the inverse frequencies according to the original RoPE implementation
+    #     Args:
+    #         config ([`~transformers.PreTrainedConfig`]):
+    #             The model configuration.
+    #         device (`torch.device`):
+    #             The device to use for initialization of the inverse frequencies.
+    #         seq_len (`int`, *optional*):
+    #             The current sequence length. Unused for this type of RoPE.
+    #     Returns:
+    #         Tuple of (`torch.Tensor`, `float`), containing the inverse frequencies for the RoPE embeddings and the
+    #         post-processing scaling factor applied to the computed cos/sin (unused in this type of RoPE).
+    #     """
+    #     base = config.rope_parameters["rope_theta"]
+    #     dim = getattr(config, "head_dim", None) or config.hidden_size // config.num_attention_heads
+
+    #     attention_factor = 1.0  # Unused in this type of RoPE
+
+    #     # Compute the inverse frequencies
+    #     inv_freq = 1.0 / (
+    #         base ** (torch.arange(0, dim, 2, dtype=torch.int64).to(device=device, dtype=torch.float) / dim)
+    #     )
+    #     return inv_freq, attention_factor
+
+    @torch.no_grad()
+    #@dynamic_rope_update  # power user: used with advanced RoPE types (e.g. dynamic rope)
+    def forward(self, x, position_ids):
+        # inv_freq = 1.0 / (
+        #     self.base ** (torch.arange(0, self.dim, 2, dtype=torch.int64).to(device=x.device, dtype=torch.float) / self.dim)
+        # )
+
+        inv_freq_expanded = self.inv_freq[None, :, None].float().expand(position_ids.shape[0], -1, 1).to(x.device)
+        #inv_freq_expanded = inv_freq[None, :, None].float().expand(position_ids.shape[0], -1, 1).to(x.device)
+        position_ids_expanded = position_ids[:, None, :].float()
+
+        device_type = x.device.type if isinstance(x.device.type, str) and x.device.type != "mps" else "cpu"
+        with torch.autocast(device_type=device_type, enabled=False):  # Force float32
+            freqs = (inv_freq_expanded.float() @ position_ids_expanded.float()).transpose(1, 2)
+            emb = torch.cat((freqs, freqs), dim=-1)
+            cos = emb.cos() * self.attention_scaling
+            sin = emb.sin() * self.attention_scaling
+
+        return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)
+
+def generate_rotary_embedding(like:Tensor, max_seqlen:int, dim:int, theta:float = 10000.0, scale:float = 1):
+    inv_freq = 1.0 / (theta ** (torch.arange(0, dim, 2, dtype=torch.int64).to(device=like.device, dtype=torch.float) / dim))
+    with torch.autocast(device_type=like.device.type, enabled=False):  # Force float32
+        angles = torch.outer(torch.arange(max_seqlen, dtype=torch.int64).to(device=like.device, dtype=torch.float), inv_freq)
+        emb = torch.cat((angles, angles), dim=-1)
+    return torch.stack([emb.cos().to(like), emb.sin().to(like)], dim=0)
 
 # Copied from transformers.models.llama.modeling_llama.rotate_half
 def rotate_half(x):
@@ -364,15 +438,25 @@ def rotate_half(x):
     return torch.cat((-x2, x1), dim=-1)
 
 
+# # Copied from transformers.models.mixtral.modeling_mixtral.apply_rotary_pos_emb
+# def apply_rotary_pos_emb(q, k, cos, sin, unsqueeze_dim:int=1):
+#     B = q.size(0)
+#     # if unsqueeze_dim == 2:
+#     #     L = q.size(1)
+#     # else:
+#     #     L = q.size(2)
+#     # cos = cos[:L].unsqueeze(0).expand(B,L,-1).unsqueeze(unsqueeze_dim)
+#     # sin = sin[:L].unsqueeze(0).expand(B,L,-1).unsqueeze(unsqueeze_dim)
+#     cos = cos.unsqueeze(0).expand(B,-1,-1).unsqueeze(unsqueeze_dim)
+#     sin = sin.unsqueeze(0).expand(B,-1,-1).unsqueeze(unsqueeze_dim)
+#     q_embed = (q * cos) + (rotate_half(q) * sin)
+#     k_embed = (k * cos) + (rotate_half(k) * sin)
+#     return q_embed, k_embed
+
 # Copied from transformers.models.mixtral.modeling_mixtral.apply_rotary_pos_emb
 def apply_rotary_pos_emb(q, k, cos, sin, unsqueeze_dim:int=1):
-    B = q.size(0)
-    if unsqueeze_dim == 2:
-        L = q.size(1)
-    else:
-        L = q.size(2)
-    cos = cos[:L].unsqueeze(0).expand(B,L,-1).unsqueeze(unsqueeze_dim)
-    sin = sin[:L].unsqueeze(0).expand(B,L,-1).unsqueeze(unsqueeze_dim)
+    cos = cos.unsqueeze(unsqueeze_dim)
+    sin = sin.unsqueeze(unsqueeze_dim)
     q_embed = (q * cos) + (rotate_half(q) * sin)
     k_embed = (k * cos) + (rotate_half(k) * sin)
     return q_embed, k_embed
@@ -439,12 +523,6 @@ class TMix_qwen3(nn.Module):
         self.q_norm = Qwen3RMSNorm(self.head_dim, eps=config.rms_norm_eps)
         self.k_norm = Qwen3RMSNorm(self.head_dim, eps=config.rms_norm_eps)
 
-        # self.rotary_emb = Qwen3RotaryEmbedding(
-        #     self.head_dim,
-        #     max_position_embeddings=config.rope.max_seqlen,
-        #     base=config.rope.base,
-        # )
-
     def forward(self, x, reset_mask, v_first, last_model_state:ModelState, shared:Shared, output_attentions:bool=False):
         last_state = last_model_state.block_states[self.layer_id].time_mix_state
         B, L, D = x.size()
@@ -472,7 +550,7 @@ class TMix_qwen3(nn.Module):
 
         #q, k = apply_rotary_embedding(q, k, shared.angles)
         #kv_seq_len, position_ids = L, torch.arange(L, dtype=torch.int, device=v.device).view(1, L).expand(B, L)
-        #cos, sin = self.rotary_emb(v, seq_len=kv_seq_len)
+        #cos, sin = self.rotary_emb(v, position_ids)
         cos, sin = shared.angles.unbind(0)
         q, k = apply_rotary_pos_emb(q, k, cos, sin)
         q = q.to(v.dtype)
@@ -1433,7 +1511,7 @@ class TMix_qwen3hardpick(TMix_qwen3):
         y = self.o_proj(y)
         return y, v_first, TimeMixState(wkv_state, last_state.shift_state), attn_weights
 
-def ortho_init(x, scale):
+def ortho_init_(x, scale):
     with torch.no_grad():
         shape = x.shape
         if len(shape) == 2:
@@ -1530,7 +1608,7 @@ class TMix_qwen3newatt(TMix_qwen3):
             if layer_id > 0:
                 module.v0.copy_(1.0)
                 module.v1.zero_()
-                ortho_init(module.v2, 0.1)
+                ortho_init_(module.v2, 0.1)
 
     def reset_parameters_after_load(self):
         print("Called reset_parameters_after_load on TMix_qwen3newatt layer ", self.layer_id)
@@ -2324,7 +2402,7 @@ class TMix_qwen3_sympow(TMix_qwen3):
                 module.gate.weight.zero_()                
             elif config.gate_rank_type == 2:
                 module.g1.zero_()
-                ortho_init(module.g2, 0.1)
+                ortho_init_(module.g2, 0.1)
 
     def reset_parameters_after_load(self):
         print("Called reset_parameters_after_load on TMix_qwen3_sympow layer ", self.layer_id)
@@ -2581,7 +2659,7 @@ class TMix_qwen3rwkv6(TMix_qwen3):
                 module.gate.weight.zero_()                
             elif config.gate_rank_type == 2:
                 module.g1.zero_()
-                ortho_init(module.g2, 0.1)
+                ortho_init_(module.g2, 0.1)
 
             # FIXME - this is not in the right place to override loaded parameters
             # if config.reinit_att:
@@ -2793,9 +2871,10 @@ class TMix_qwen3rwkv7(TMix_qwen3):
             self.k2 = nn.Parameter(torch.empty(lora_rank_value_residual_mix, v_first_headsize*N))
 
         #if layer_id > 0:
-        self.v0 = nn.Parameter(torch.empty(1,1,v_first_headsize*N))
+        #self.v0 = nn.Parameter(torch.empty(1,1,v_first_headsize*N))
         self.v1 = nn.Parameter(torch.empty(C, lora_rank_value_residual_mix))
         self.v2 = nn.Parameter(torch.empty(lora_rank_value_residual_mix, v_first_headsize*N))
+        self.D_MV_LoRA_Scaling = 0.2
             
         if config.gate_rank_type == 1:
             self.gate = nn.Linear(self.hidden_size, self.num_heads * self.head_dim, bias=False)
@@ -2806,9 +2885,9 @@ class TMix_qwen3rwkv7(TMix_qwen3):
         #self.kk1 = nn.Parameter(torch.empty(C, lora_rank_deformed_key))
         #self.kk2 = nn.Parameter(torch.empty(lora_rank_deformed_key, C))
 
-        self.k_k = nn.Parameter(torch.empty(1,1,self.num_heads * self.qk_head_dim))
-        self.k_a = nn.Parameter(torch.empty(1,1,self.num_heads * self.qk_head_dim))
-        self.r_k = nn.Parameter(torch.empty(H,N))
+        # self.k_k = nn.Parameter(torch.empty(1,1,self.num_heads * self.qk_head_dim))
+        # self.k_a = nn.Parameter(torch.empty(1,1,self.num_heads * self.qk_head_dim))
+        # self.r_k = nn.Parameter(torch.empty(H,N))
 
         #self.receptance = nn.Linear(self.hidden_size, self.num_heads * self.qk_head_dim, bias=False)
         #self.key = nn.Linear(self.num_key_value_heads * self.head_dim, self.num_heads * self.qk_head_dim, bias=False)
@@ -2837,17 +2916,17 @@ class TMix_qwen3rwkv7(TMix_qwen3):
         # )
         # time_weight = time_weight[None, None, :]
 
-        decay_speed = [
-            -7.0 + 5.0 * (n / (dim_att - 1)) ** (0.85 + 1.0 * ratio_0_to_1 ** 0.5)
-            for n in range(dim_att)
-        ]
+        # decay_speed = [
+        #     -7.0 + 5.0 * (n / (dim_att - 1)) ** (0.85 + 1.0 * ratio_0_to_1 ** 0.5)
+        #     for n in range(dim_att)
+        # ]
 
         # def inverse_sigmoid(x): return math.log(x) - math.log(1 - x)
         # decay_speed = [
         #     inverse_sigmoid(0.995) + (inverse_sigmoid(0.875)-inverse_sigmoid(0.995)) * (n / (attention_hidden_size - 1)) ** (0.85 + 1.0 * ratio_0_to_1 ** 0.5)
         #     for n in range(attention_hidden_size)
         # ]
-        decay_speed = torch.tensor(decay_speed, dtype=module.w0.dtype, device=module.w0.device)
+        # decay_speed = torch.tensor(decay_speed, dtype=module.w0.dtype, device=module.w0.device)
 
         with torch.no_grad():
             # torch.nn.init.zeros_(module.x_r) #.copy_( 1.0 - torch.pow(time_weight, 0.2 * ratio_1_to_almost0) )
@@ -2857,11 +2936,24 @@ class TMix_qwen3rwkv7(TMix_qwen3):
             # torch.nn.init.zeros_(module.x_a) #.copy_( 1.0 - torch.pow(time_weight, 0.9 * ratio_1_to_almost0) )
             # torch.nn.init.zeros_(module.x_g) #.copy_( 1.0 - torch.pow(time_weight, 0.2 * ratio_1_to_almost0) )
             
+            H = self.num_heads
+            N = self.head_dim
+            dim_att = H * N
+
             ratio_0_to_1 = layer_id / (n_layer - 1)  # 0 to 1
             ratio_1_to_almost0 = 1.0 - (layer_id / n_layer)  # 1 to ~0
             ddd = torch.ones(1, 1, n_embd)
             for i in range(n_embd):
                 ddd[0, 0, i] = i / n_embd
+
+            www = torch.zeros(dim_att)
+            zigzag = torch.zeros(dim_att)
+            linear = torch.zeros(dim_att)
+            for n in range(dim_att):
+                linear[n] = n / (dim_att-1) - 0.5
+                zigzag[n] = ((n % N) - ((N-1) / 2)) / ((N-1) / 2)
+                zigzag[n] = zigzag[n] * abs(zigzag[n])
+                www[n] = -6 + 6 * (n / (dim_att - 1)) ** (1 + 1 * ratio_0_to_1 ** 0.3)               
 
             # initialization comes from fitting my RWKV-6 7B runs
             #module.time_maa_x = nn.Parameter(1.0 - torch.pow(ddd, 0.6 * ratio_1_to_almost0 ** 0.9))
@@ -2874,38 +2966,44 @@ class TMix_qwen3rwkv7(TMix_qwen3):
             # module.k1.zero_()
             # ortho_init(module.k2, 0.1)
 
-            module.w0.copy_(decay_speed.reshape(1,1,-1) + 0.5) # !!! 0.5 comes from F.softplus !!!
+            module.w0.copy_((www.reshape(1,1,dim_att) + 0.5 + zigzag*2.5).to(module.w0)) # !!! 0.5 comes from F.softplus !!!
             #module.w0.copy_(decay_speed.reshape(1,1,-1) - 1.0)
             #module.w0.copy_(-2.0 + 1e-5 * torch.randn(1, 1, dim_att))
-            module.w1.zero_()
-            ortho_init(module.w2, 0.1)
+            ortho_init_(module.w1, 0.1) #module.w1.zero_()
+            ortho_init_(module.w2, 0.1)
 
-            module.a0.zero_()
-            module.a1.zero_()
-            ortho_init(module.a2, 0.1)
+            module.a0.copy_((-0.19 + zigzag*0.3 + linear*0.4).to(module.a0)) #module.a0.zero_()
+            ortho_init_(module.a1, 0.1) #module.a1.zero_()
+            ortho_init_(module.a2, 0.1)
 
-            if layer_id > 0:
-                if self.use_k_first:
-                    module.k0.copy_(1.0)
-                    module.k1.zero_()
-                    ortho_init(module.k2, 0.1)
-                module.v0.copy_(1.0)
-                module.v1.zero_()
-                ortho_init(module.v2, 0.1)
+            #if layer_id > 0:
+            if self.use_k_first:
+                module.k0.copy_(1.0)
+                module.k1.zero_()
+                ortho_init_(module.k2, 0.1)
+            #module.v0.copy_(1.0)
+            ortho_init_(module.v1, 0.1) #module.v1.zero_()
+            ortho_init_(module.v2, 0.1)
 
             if self.config.gate_rank_type == 1:
                 module.gate.weight.zero_()
             elif self.config.gate_rank_type == 2:
                 module.g1.zero_()
-                ortho_init(module.g2, 0.1)
+                ortho_init_(module.g2, 0.1)
 
             #module.kk1.zero_()
             #ortho_init(module.kk2, 0.1)
             
-            module.k_k.copy_(0.85) # FIXME - should this be 1.0?
-            module.k_a.copy_(1.0)
-            module.r_k.zero_()
+            # module.k_k.copy_(0.85) # FIXME - should this be 1.0?
+            # module.k_a.copy_(1.0)
+            # module.r_k.zero_()
 
+
+            module.q_proj.weight *= 0.5
+            module.k_proj.weight *= 0.5
+            module.v_proj.weight *= 0.3
+            module.o_proj.weight *= 0.5
+        
             #module.receptance.weight.data.uniform_(-0.5/(C**0.5), 0.5/((self.num_heads*self.qk_head_dim)**0.5))
             #module.key.weight.data.uniform_(-0.05/(C**0.5), 0.05/((self.num_heads*self.qk_head_dim)**0.5))
             #module.value.weight.data.uniform_(-0.5/(C**0.5), 0.5/(attention_hidden_size**0.5))
@@ -2982,25 +3080,7 @@ class TMix_qwen3rwkv7(TMix_qwen3):
             r = r.transpose(1,2).view(B,T,-1).to(v.dtype)
             k = k.transpose(1,2).view(B,T,-1).to(v.dtype)
 
-        if self.v0.shape[-2] == self.num_key_value_heads:
-            if self.layer_id == 0:
-                if self.use_k_first:
-                    v_first = torch.cat([k,v], dim=-1)
-                else:
-                    v_first = v
-            else:
-                if self.use_k_first:
-                    v_first_k, v_first_v = torch.chunk(v_first, 2, dim=-1)
-                    k = k + (v_first_k - k) * torch.sigmoid(self.k0 + (xv @ self.k1) @ self.k2)
-                    v = v + (v_first_v - v) * torch.sigmoid(self.v0 + (xv @ self.v1) @ self.v2)
-                else:
-                    v = v + (v_first - v) * torch.sigmoid(self.v0 + (xv @ self.v1) @ self.v2)
-
-        # repeat k/v heads if n_kv_heads < n_heads
-        k = k.view(B, T, -1, 1, self.head_dim).expand(-1, -1, -1, self.num_key_value_groups, -1).reshape(B, T, -1)
-        v = v.view(B, T, -1, 1, self.head_dim).expand(-1, -1, -1, self.num_key_value_groups, -1).reshape(B, T, -1)
-
-        if self.v0.shape[-2] == self.num_heads:
+        # if self.v0.shape[-2] == self.num_key_value_heads:
         #     if self.layer_id == 0:
         #         if self.use_k_first:
         #             v_first = torch.cat([k,v], dim=-1)
@@ -3014,12 +3094,30 @@ class TMix_qwen3rwkv7(TMix_qwen3):
         #         else:
         #             v = v + (v_first - v) * torch.sigmoid(self.v0 + (xv @ self.v1) @ self.v2)
 
-            # if self.use_k_first:
-            #     k = k + torch.tanh(xk @ self.k1) @ self.k2
-            # v = v + torch.tanh(xv @ self.v1) @ self.v2
-            if self.use_k_first:
-                k = k + (xk @ self.k1) @ self.k2
-            v = v + (xv @ self.v1) @ self.v2
+        # repeat k/v heads if n_kv_heads < n_heads
+        k = k.view(B, T, -1, 1, self.head_dim).expand(-1, -1, -1, self.num_key_value_groups, -1).reshape(B, T, -1)
+        v = v.view(B, T, -1, 1, self.head_dim).expand(-1, -1, -1, self.num_key_value_groups, -1).reshape(B, T, -1)
+
+        # if self.v0.shape[-2] == self.num_heads:
+        #     if self.layer_id == 0:
+        #         if self.use_k_first:
+        #             v_first = torch.cat([k,v], dim=-1)
+        #         else:
+        #             v_first = v
+        #     else:
+        #         if self.use_k_first:
+        #             v_first_k, v_first_v = torch.chunk(v_first, 2, dim=-1)
+        #             k = k + (v_first_k - k) * torch.sigmoid(self.k0 + (xv @ self.k1) @ self.k2)
+        #             v = v + (v_first_v - v) * torch.sigmoid(self.v0 + (xv @ self.v1) @ self.v2)
+        #         else:
+        #             v = v + (v_first - v) * torch.sigmoid(self.v0 + (xv @ self.v1) @ self.v2)
+
+        # if self.use_k_first:
+        #     k = k + torch.tanh(xk @ self.k1) @ self.k2
+        # v = v + torch.tanh(xv @ self.v1) @ self.v2
+        if self.use_k_first:
+            k = k + (xk @ self.k1) @ self.k2
+        v = v + (xv @ self.v1) @ self.v2 * self.D_MV_LoRA_Scaling
 
         # k = k.view(B,T,H,-1).float()
         # k = (k / (torch.norm(k, dim=-1, keepdim=True) + 1e-12)).view(B,T,-1).to(k.dtype)
@@ -3244,26 +3342,26 @@ class TMix_qwen3rwkv7c(TMix_qwen3):
             #module.w0.copy_(decay_speed.reshape(1,1,-1) - 1.0)
             #module.w0.copy_(-2.0 + 1e-5 * torch.randn(1, 1, dim_att))
             module.w1.zero_()
-            ortho_init(module.w2, 0.1)
+            ortho_init_(module.w2, 0.1)
 
             module.a0.zero_()
             module.a1.zero_()
-            ortho_init(module.a2, 0.1)
+            ortho_init_(module.a2, 0.1)
 
             if layer_id > 0:
                 if self.use_k_first:
                     module.k0.copy_(1.0)
                     module.k1.zero_()
-                    ortho_init(module.k2, 0.1)
+                    ortho_init_(module.k2, 0.1)
                 module.v0.copy_(1.0)
                 module.v1.zero_()
-                ortho_init(module.v2, 0.1)
+                ortho_init_(module.v2, 0.1)
 
             if self.config.gate_rank_type == 1:
                 module.gate.weight.zero_()
             elif self.config.gate_rank_type == 2:
                 module.g1.zero_()
-                ortho_init(module.g2, 0.1)
+                ortho_init_(module.g2, 0.1)
 
             #module.kk1.zero_()
             #ortho_init(module.kk2, 0.1)
@@ -3828,17 +3926,29 @@ class Qwen3Decoder(nn.Module):
         )
         self.norm = Qwen3RMSNorm(args.n_embd, eps=args.rms_norm_eps)
 
+        self.rotary_emb = Qwen3RotaryEmbedding(
+            self.norm.weight.device,
+            args.head_size,
+            #max_position_embeddings=config.rope.max_seqlen,
+            base=args.rope.base,
+        )
+
     def forward_preamble(self, x, last_model_state:ModelState|None = None, ):
         config : Transformer_Config = self.config.model
 
         B, T, C = x.size()
 
         shared = self.shared
-        if config.rope is not None and T > shared.angles.size(0):
-            max_ctx_len = max(config.ctx_len, (T + 15) // 16 * 16)
-            shared.angles = generate_rotary_embedding(max_ctx_len, config.head_size, config.rope.base * config.rope.rebase, config.rope.rescale).to(self.norm.weight)
 
-        assert (shared.angles.size(0) == 0 or T <= shared.angles.size(0)) or (shared.bias_mask.size(0) == 0 or T <= shared.bias_mask.size(0))
+        # # if config.rope is not None and T > shared.angles.size(0):
+        # max_ctx_len = max(config.ctx_len, (T + 15) // 16 * 16)
+        # shared.angles = generate_rotary_embedding(x, max_ctx_len, config.head_size, config.rope.base * config.rope.rebase, config.rope.rescale).view(2,1,T,-1).expand(-1,B,-1,-1)
+
+        position_ids = torch.arange(T, dtype=torch.int, device=x.device).view(1, T).expand(B, T)
+        position_embeddings = self.rotary_emb(x, position_ids)
+        shared.angles = torch.stack(position_embeddings)
+
+        #assert (shared.angles.size(0) == 0 or T <= shared.angles.size(0)) or (shared.bias_mask.size(0) == 0 or T <= shared.bias_mask.size(0))
 
         # might need to be true in the future for BPTT support
         requires_grad = self.training
@@ -4016,7 +4126,7 @@ class Model_qwen3(nn.Module): # Qwen3CausalLM
             for decoder_layer in self.model.layers:
                 #decoder_layer.self_attn.v_proj.requires_grad_(False) # FIXME - freezing V
 
-                decoder_layer.post_attention_layernorm.requires_grad_(False)
+                #decoder_layer.post_attention_layernorm.requires_grad_(False)
                 decoder_layer.mlp.requires_grad_(False)
             # self.model.embed_tokens.requires_grad_(False) # NOTE - mose says deepspeed bug causes problems when this is false, so he used lr=0
             self.model.norm.requires_grad_(False)
@@ -4043,6 +4153,7 @@ class Model_qwen3(nn.Module): # Qwen3CausalLM
         lr_decay = set()
         lr_0x = set()
         lr_1x = set()
+        lr_2x = set()
         lr_fp32 = set()
         lr_2 = set()
         for n, p in self.named_parameters():
@@ -4051,19 +4162,30 @@ class Model_qwen3(nn.Module): # Qwen3CausalLM
             if 'embed_tokens' in n:
                 # FIXME - zero LR on embeddings because of deepspeed bug in requires_grad=False for those
                 lr_0x.add(n)
+                print(n, '0x LR')
                 continue
             # if 'lm_head' in n or 'embed_tokens' in n:
             #     lr_fp32.add(n)
             #     continue
-            if '.self_attn.' in n: # and not is_layer_attention(self.config.model, int(n.split('.')[2])):
-                lr_2.add(n)
+            if ('attn.w0' in n ):
+                print(n, '2x LR')
+                lr_2x.add(n)
                 continue
+
             # NOTE - this check is no good in FSDP because the tensors end up with some stupid fake shape
             #if (len(p.squeeze().shape) >= 2) and (train_config.weight_decay > 0):
-            if train_config.weight_decay > 0 and '.bias' not in n and 'norm' not in n and 'ln' not in n:
+            if train_config.weight_decay > 0 and len(p.squeeze().shape) >= 2: #'.bias' not in n and 'norm' not in n and 'ln' not in n:
+                print(n, 'wd LR')
                 lr_decay.add(n)
-            else:
-                lr_1x.add(n)
+                continue
+
+            if '.self_attn.' in n: # and not is_layer_attention(self.config.model, int(n.split('.')[2])):
+                print(n, 'lr2 LR')
+                lr_2.add(n)
+                continue
+
+            print(n, '1x LR')
+            lr_1x.add(n)
 
         param_dict = {n: p for n, p in self.named_parameters()}
         #param_check = list(lr_decay) + list(lr_1x) + list(lr_fp32)
@@ -4073,11 +4195,13 @@ class Model_qwen3(nn.Module): # Qwen3CausalLM
         lr_decay = sorted(list(lr_decay))
         lr_0x = sorted(list(lr_0x))
         lr_1x = sorted(list(lr_1x))
+        lr_2x = sorted(list(lr_2x))
         lr_fp32 = sorted(list(lr_fp32))
         lr_2 = sorted(list(lr_2))
         
         print('0x', len(lr_0x), '\n')
         print('1x', len(lr_1x), '\n')
+        print('2x', len(lr_2x), '\n')
         print('decay', len(lr_decay), '\n')
         print('fp32', len(lr_fp32), '\n')
         print('high', len(lr_2), '\n')
@@ -4087,6 +4211,8 @@ class Model_qwen3(nn.Module): # Qwen3CausalLM
         ]
         if len(lr_0x) > 0:
             optim_groups += [{"params": [param_dict[n] for n in lr_0x], "weight_decay": train_config.weight_decay, "my_lr_scale": 0.0, 'name':'lr_0x'}]
+        if len(lr_2x) > 0:
+            optim_groups += [{"params": [param_dict[n] for n in lr_2x], "weight_decay": train_config.weight_decay, "my_lr_scale": 2.0, 'name':'lr_2x'}]
         if len(lr_fp32) > 0:
             # FIXME - NOTE THIS VERY LOW LR SCALE!!!
             optim_groups += [{"params": [param_dict[n] for n in lr_fp32], "weight_decay": train_config.weight_decay, "my_lr_scale": 0.5, 'name':'lr_fp32'}]

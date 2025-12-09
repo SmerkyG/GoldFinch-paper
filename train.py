@@ -374,14 +374,14 @@ if __name__ == "__main__":
         # from torch.utils.data.distributed import DistributedSampler
         # train_sampler = DistributedSampler(
         #     typed_dataset,
-        #     num_replicas=self.trainer.world_size,
-        #     rank=self.trainer.local_rank,
+        #     num_replicas=trainer.world_size,
+        #     rank=trainer.local_rank,
         #     shuffle=True
         # )
         train_data_loader = torch.utils.data.DataLoader(
             typed_dataset, 
             batch_size=config.train.micro_bsz,
-            #sampler=train_sampler,
+            # sampler=train_sampler, # FIXME
             num_workers=1, 
             pin_memory=True, 
             persistent_workers=False, 

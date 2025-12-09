@@ -113,27 +113,27 @@ class LightningModelWrapper(pl.LightningModule):
         # we require that the module supports configure_model for this code to work well
         #if hasattr(self.model, 'configure_model'):
         #with self.trainer.init_module(empty_init=True): # FIXME - we can probably use this instead of meta then convert to dtype then to_empty
-        with init_on_meta_device():
-            model.configure_model()
+        # with init_on_meta_device():
+        model.configure_model()
 
         dtype_map = {"bf16-true":torch.bfloat16, "bf16-mixed":torch.bfloat16, "16-true":torch.float16, "16-mixed":torch.float16, "32-true":torch.float32}
         dtype = dtype_map[self.trainer.precision]
 
         print("Moving model to dtype ", dtype)
         model.to(dtype=dtype)
-        if 'fsdp' in self.config.train.strategy:
-            if self.trainer.global_rank == 0:
-                if do_reset:
-                    # NOTE - we could put it on cpu here for truly huge models, but it's a LOT faster to reset parameters on GPU
-                    print("Moving model to empty on", self.device)
-                    model.to_empty(device=self.device, recurse=True)
-                else:
-                    print("Moving model to empty on cpu")
-                    model.to_empty(device=torch.device('cpu'), recurse=True)
-            # else leave it as a meta tensor on non-zero ranks... FSDP will convert
-        else:
-            print("Moving model to empty on", self.device)
-            model.to_empty(device=self.device, recurse=True)
+        # if 'fsdp' in self.config.train.strategy:
+        #     if self.trainer.global_rank == 0:
+        #         if do_reset:
+        #             # NOTE - we could put it on cpu here for truly huge models, but it's a LOT faster to reset parameters on GPU
+        #             print("Moving model to empty on", self.device)
+        #             model.to_empty(device=self.device, recurse=True)
+        #         else:
+        #             print("Moving model to empty on cpu")
+        #             model.to_empty(device=torch.device('cpu'), recurse=True)
+        #     # else leave it as a meta tensor on non-zero ranks... FSDP will convert
+        # else:
+        #     print("Moving model to empty on", self.device)
+        #     model.to_empty(device=self.device, recurse=True)
 
         if self.trainer.global_rank == 0:
             # reset parameters, if needed
@@ -566,24 +566,35 @@ class LightningModelWrapper(pl.LightningModule):
                     # training_loss = training_loss * overall_scaling_factor
                     # # FIXME - not quite perfect because the average will be brought down by uncounted EOS tokens
 
-                    t = torch.stack(results.post_attention_hidden_states, dim=0).float()
-                    s = torch.stack(results.student_post_attention_hidden_states, dim=0).float()
-                    #manual_loss_scaling = (results.post_attention_hidden_states[0].size(-1) ** -0.5)
-                    #manual_loss_scaling = 250
-                    #s_normed = F.normalize(s, dim=-1)
-                    #t_normed = F.normalize(t, dim=-1)
-                    #s_norm = torch.linalg.vector_norm(s, dim=-1, keepdim=True) + 1e-12
-                    t_norm = torch.linalg.vector_norm(t, dim=-1, keepdim=True) + 1e-12
-                    s_normed = s / t_norm
-                    t_normed = t / t_norm
-                    #training_loss = torch.linalg.vector_norm(t - s, dim=-1).mean() * (results.post_attention_hidden_states[0].size(-1) ** -0.5)
-                    #training_loss = torch.linalg.vector_norm(t_normed - s_normed, dim=-1).mean()
-                    #training_loss = F.mse_loss(t, s)
-                    training_loss = F.mse_loss(t_normed, s_normed) * (t.shape[-1] / 10.0)
-                    #s_normed = F.normalize(s, dim=-1)
-                    #t_normed = F.normalize(t, dim=-1)
-                    #training_loss = F.mse_loss(t_normed, s_normed)
-                    #training_loss = training_loss * manual_loss_scaling
+                    t_h = results.post_attention_hidden_states
+                    s_h = results.student_post_attention_hidden_states
+                    t = torch.stack(t_h, dim=0).float()
+                    s = torch.stack(s_h, dim=0).float()
+                    # #manual_loss_scaling = (results.post_attention_hidden_states[0].size(-1) ** -0.5)
+                    # #manual_loss_scaling = 250
+                    # #s_normed = F.normalize(s, dim=-1)
+                    # #t_normed = F.normalize(t, dim=-1)
+                    # #s_norm = torch.linalg.vector_norm(s, dim=-1, keepdim=True) + 1e-12
+                    # t_norm = torch.linalg.vector_norm(t, dim=-1, keepdim=True) + 1e-12
+                    # s_normed = s / t_norm
+                    # t_normed = t / t_norm
+                    # #training_loss = torch.linalg.vector_norm(t - s, dim=-1).mean() * (results.post_attention_hidden_states[0].size(-1) ** -0.5)
+                    # #training_loss = torch.linalg.vector_norm(t_normed - s_normed, dim=-1).mean()
+                    # #training_loss = F.mse_loss(t, s)
+                    # training_loss = F.mse_loss(t_normed, s_normed) * (t.shape[-1] / 10.0)
+                    # #s_normed = F.normalize(s, dim=-1)
+                    # #t_normed = F.normalize(t, dim=-1)
+                    # #training_loss = F.mse_loss(t_normed, s_normed)
+                    # #training_loss = training_loss * manual_loss_scaling
+
+                    overall_scaling_constant = 175.0 / 64 # 175 was measured avg last layer norm for qwen3-8b, and 64 was sqrt(4096) hidden size for 8B
+                    overall_scaling_factor = overall_scaling_constant / torch.linalg.vector_norm(t_h[-1], dim=-1).mean()
+                    layer_scaling_factors = torch.linalg.vector_norm(t[-1], dim=-1).unsqueeze(0).mean(dim=[1,2]) / torch.linalg.vector_norm(torch.stack(t_h), dim=-1).mean(dim=[1,2])
+                    stacked_t_h = torch.stack(t_h) * layer_scaling_factors.view(-1,1,1,1)
+                    stacked_s_h = torch.stack(s_h) * layer_scaling_factors.view(-1,1,1,1)
+                    #training_loss = torch.linalg.vector_norm(stacked_t_h - stacked_s_h, dim=-1)
+                    training_loss = F.mse_loss(stacked_s_h,stacked_t_h)
+                    training_loss = training_loss * overall_scaling_factor
 
                     old_style_training_loss = torch.linalg.vector_norm(t - s, dim=-1).float().mean() * (results.post_attention_hidden_states[0].size(-1) ** -0.5)
                     print("old style loss:", old_style_training_loss.item())
@@ -599,58 +610,6 @@ class LightningModelWrapper(pl.LightningModule):
             preds = torch.zeros_like(y)
             next_model_state = last_model_state
         else:
-            
-            if self.training and self.config.train.attention_distillation_stage == 23:
-                results = self.model.forward(x, output_hidden_states=True, output_attentions=False, output_post_attention_hidden_states=False)
-                self.teacher.eval()
-                with torch.no_grad():
-                    teacher_results = self.teacher.forward(x, output_hidden_states=True)
-                #reported_loss = training_loss = torch.linalg.vector_norm(torch.cat(teacher_results.hidden_states[1:], dim=0) - torch.cat(results.hidden_states[1:], dim=0), dim=-1).mean() * (results.hidden_states[0].size(-1) ** -0.5)
-
-                student_logits = results.logits
-                flat_student_logits = student_logits.view(-1, student_logits.size(-1))
-                with torch.no_grad():
-                    preds = student_logits.argmax(dim=-1)
-
-                teacher_logits = teacher_results.logits
-                flat_teacher_logits = teacher_logits.view(-1, teacher_logits.size(-1))
-
-                chunk_len = 512
-                n_chunks = (flat_student_logits.size(0) + chunk_len - 1) // chunk_len
-
-                # memory saving measure, because otherwise kl_div tried to allocate everything all at once
-                distillation_loss = torch.tensor(0.0, device=flat_student_logits.device, dtype=flat_student_logits.dtype)
-                for c in range(0, flat_student_logits.size(0), chunk_len):
-                    student_log_softmax = F.log_softmax(flat_student_logits[c:c+chunk_len], dim=-1)
-                    teacher_log_softmax = F.log_softmax(flat_teacher_logits[c:c+chunk_len], dim=-1)
-                    distillation_loss = distillation_loss + F.kl_div(
-                        student_log_softmax,
-                        teacher_log_softmax,
-                        log_target=True,
-                        reduction='batchmean'
-                    )
-                distillation_loss = distillation_loss / n_chunks
-
-                #reported_loss = training_loss = distillation_loss + torch.linalg.vector_norm(teacher_results.hidden_states[-1] - results.hidden_states[-1], dim=-1).mean() * (results.hidden_states[0].size(-1) ** -0.5)
-                hidden_states_loss = torch.tensor(0.0, device=flat_student_logits.device, dtype=flat_student_logits.dtype)
-                for layer_id in range(1,len(results.hidden_states)-1):
-                    hidden_states_loss = hidden_states_loss + torch.linalg.vector_norm(teacher_results.hidden_states[layer_id] - results.hidden_states[layer_id], dim=-1).mean() / (len(results.hidden_states)-2) * (results.hidden_states[0].size(-1) ** -0.5)
-                reported_loss = training_loss = distillation_loss + hidden_states_loss
-                logits = torch.tensor([], device=x.device)
-                return reported_loss, training_loss, logits, preds, last_model_state
-
-            # if self.training and self.config.train.attention_distillation_stage == 2:
-            #     results = self.model.forward(x, output_hidden_states=True, output_attentions=False, output_post_attention_hidden_states=False)
-            #     self.teacher.eval()
-            #     with torch.no_grad():
-            #         teacher_results = self.teacher.forward(x, output_hidden_states=True)
-            #     # FIXME - argh this doesn't work because FSDP slices up the lm_head.weight so we can't use it here
-            #     print(results.hidden_states[-1].view(-1, results.hidden_states[-1].size(-1)).shape, teacher_results.hidden_states[-1].view(-1, teacher_results.hidden_states[-1].size(-1)).shape, self.model.lm_head.weight.shape, self.teacher.lm_head.weight.shape)
-            #     exit()
-            #     reported_loss = training_loss = self.kl_div_loss(results.hidden_states[-1].view(-1, results.hidden_states[-1].size(-1)), teacher_results.hidden_states[-1].view(-1, teacher_results.hidden_states[-1].size(-1)), self.model.lm_head.weight, self.teacher.lm_head.weight)
-            #     logits = torch.tensor([], device=x.device)
-            #     preds = torch.zeros_like(y)
-            #     return reported_loss, training_loss, logits, preds, last_model_state
 
             if self.config.model.hf_path != '':
                 results = self.model(x, output_hidden_states=False)
@@ -677,7 +636,7 @@ class LightningModelWrapper(pl.LightningModule):
 
             reported_loss = training_loss = distillation_loss = ce_loss = torch.tensor(0.0, device=flat_student_logits.device, dtype=flat_student_logits.dtype)
 
-            chunk_loss_calcs = self.config.train.attention_distillation_stage in (-1, 2, 21, 31)
+            chunk_loss_calcs = False #self.config.train.attention_distillation_stage in (-1, 2, 21, 31)
             chunk_len = 512
             n_chunks = (flat_student_logits.size(0) + chunk_len - 1) // chunk_len
             if not self.training or self.teacher is None or self.config.train.teacher.ce_weight > 0:
@@ -725,12 +684,21 @@ class LightningModelWrapper(pl.LightningModule):
                         # )
                         # distillation_loss = distillation_loss / (flat_loss_mask.sum() + 1e-8)
                     else:
+                        # distillation_loss = F.kl_div(
+                        #     F.log_softmax(flat_student_logits, dim=-1),
+                        #     F.log_softmax(flat_teacher_logits, dim=-1),
+                        #     log_target=True,
+                        #     reduction='batchmean'
+                        # )
                         distillation_loss = F.kl_div(
-                            F.log_softmax(flat_student_logits, dim=-1),
-                            F.log_softmax(flat_teacher_logits, dim=-1),
-                            log_target=True,
-                            reduction='batchmean'
+                            F.log_softmax(logits, dim=-1),
+                            #F.log_softmax(flat_teacher_logits, dim=-1),
+                            F.softmax(teacher_logits, dim=-1),
+                            log_target=False,
+                            reduction='none'
                         )
+                        distillation_loss_per_token = distillation_loss.sum(dim=-1)
+                        distillation_loss = distillation_loss_per_token.sum() / (distillation_loss_per_token.numel() + 1e-6)
                 else:
                     # memory saving measure, because otherwise kl_div tried to allocate everything all at once
                     distillation_loss = torch.tensor(0.0, device=flat_student_logits.device, dtype=torch.float) #flat_student_logits.dtype)
@@ -755,11 +723,12 @@ class LightningModelWrapper(pl.LightningModule):
                             )
                         else:
                             student_log_softmax = F.log_softmax(flat_student_logits[c:c+chunk_len], dim=-1)
-                            teacher_log_softmax = F.log_softmax(flat_teacher_logits[c:c+chunk_len], dim=-1)
+                            #teacher_log_softmax = F.log_softmax(flat_teacher_logits[c:c+chunk_len], dim=-1)
+                            teacher_softmax = F.softmax(flat_teacher_logits[c:c+chunk_len], dim=-1)
                             distillation_loss = distillation_loss + F.kl_div(
                                 student_log_softmax,
-                                teacher_log_softmax,
-                                log_target=True,
+                                teacher_softmax, #teacher_log_softmax,
+                                #log_target=True,
                                 reduction='sum'
                             )
                     if use_loss_mask:
